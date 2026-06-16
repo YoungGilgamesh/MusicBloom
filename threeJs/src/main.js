@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createQuantumCloud } from './particles/createQuantumCloud.js';
+import { initPicking } from './interaction/picking.js';
 
 const DISPLACEMENT_MARGIN = 2.5;
 
@@ -52,6 +53,8 @@ controls.autoRotateSpeed = 0.35;
 const particles = createQuantumCloud({ count: 16000 });
 scene.add(particles);
 fitCameraToCloud(camera, particles, controls);
+// Initialize picking (click-to-place marker)
+const picking = initPicking({ scene, camera, renderer, particles, pixelThreshold: 12 });
 
 const clock = new THREE.Clock();
 

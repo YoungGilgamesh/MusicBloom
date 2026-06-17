@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createQuantumCloud } from './particles/createQuantumCloud.js';
+import { setupClickMarkers } from './interaction/picking.js';
 
 const DISPLACEMENT_MARGIN = 2.5;
 
@@ -54,6 +55,15 @@ scene.add(particles);
 fitCameraToCloud(camera, particles, controls);
 
 const clock = new THREE.Clock();
+
+setupClickMarkers({
+  camera,
+  renderer,
+  scene,
+  pointCloud: particles,
+  getTime: () => clock.getElapsedTime(),
+  debug: new URLSearchParams(window.location.search).has('pickDebug'),
+});
 
 function animate() {
   requestAnimationFrame(animate);

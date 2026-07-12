@@ -1,162 +1,153 @@
+/**
+ * shaders.js — Energy Field (Neural Network) particle cloud
+ *
+ * Each cube is oriented so its long axis (Z) aligns with the local curl velocity
+ * stored in aNormal. Combined with uElongation this makes each particle look
+ * like a thin rod lying along the dendrite / axon.
+ *
+ * aNormal    = normalised curl velocity at particle's final position
+ * aPhase     = distance from soma node / max-travel [0 → 1]
+ *              0 = at soma (bright core),  1 = at tip (dimmer)
+ * aSize      = per-particle random base size
+ * uElongation= how many times longer the cube is along its axis (Z)
+ */
+
+import {
+  ZONE_MAX,
+  CLOUD_COUNT,
+  AUDIO_TREBLE_SIZE,
+  CUBE_SCALE,
+  SHAPE_SCALE,
+} from '../config.js';
+import { INSTANCE_GLSL } from './instanceTransform.glsl.js';
+
 export const vertexShader = /* glsl */ `
-  attribute float aPhase;
+  #define MAX_STONES        ${ZONE_MAX}
+  #define CLOUD_COUNT       ${CLOUD_COUNT}
+  #define AUDIO_TREBLE_SIZE ${AUDIO_TREBLE_SIZE.toFixed(4)}
+  #define CUBE_SCALE        ${CUBE_SCALE.toFixed(5)}
+
+  attribute float aPhase;   // streamline T [0,1]
   attribute float aSize;
+  attribute vec3  aNormal;  // curl velocity direction (cube Z-axis)
 
   uniform float uTime;
   uniform float uPointSize;
   uniform float uDisplacement;
   uniform float uFlowSpeed;
+  uniform float uStoneStrength;
+  uniform int   uStoneCount;
+  uniform vec4  uStones[MAX_STONES];
+  uniform vec4  uStoneSeeds[MAX_STONES];
+  uniform float uAudioMids;
+  uniform float uAudioTreble;
+  uniform float uBeatPhase;
+  uniform float uNoiseScale;
+  uniform float uDomainWarp;
+  uniform vec3  uFlowBias;
+  uniform float uOrbitStrength;
+  uniform float uJitter;
+  uniform vec4  uShapeWeights;
+  uniform float uShapeScale;
+  uniform float uReveal;
+  uniform float uElongation;
 
-  vec3 mod289(vec3 x) {
-    return x - floor(x * (1.0 / 289.0)) * 289.0;
-  }
+  // ── GPGPU sim state ────────────────────────────────────────────────────────
+  uniform sampler2D uSimPos;     // xyz = position, w = age
+  uniform sampler2D uSimCell;    // xyz = lattice cell the particle belongs to
+  uniform vec2      uSimRes;     // sim texture resolution (w, h)
+  uniform float     uSimW;       // sim texture width (for instanceID → uv)
+  uniform vec3      uCamPos;     // camera world position (kill / fade)
+  uniform float     uKillRadius; // respawn distance from camera
+  uniform float     uBirthTime;  // seconds of alpha fade-in
 
-  vec4 mod289(vec4 x) {
-    return x - floor(x * (1.0 / 289.0)) * 289.0;
-  }
+  // Baked mood velocity volume + per-instance transform params (see INSTANCE_GLSL).
+  uniform highp sampler3D uVelVolume;
+  uniform float           uVolHalf;
+  uniform float uInstPeriod;
+  uniform float uInstJitter;
+  uniform float uScaleMin;
+  uniform float uScaleMax;
 
-  vec4 permute(vec4 x) {
-    return mod289(((x * 34.0) + 1.0) * x);
-  }
+  uniform vec3  uLightPos;
 
-  vec4 taylorInvSqrt(vec4 r) {
-    return 1.79284291400159 - 0.85373472095314 * r;
-  }
+  out vec3  vNormal;
+  out vec3  vWorldPos;
+  out vec3  vViewPos;
+  out float vPhase;   // 0 = at soma (bright), 1 = at tip (dim)
+  out float vFade;    // birth / far-distance alpha envelope [0,1]
 
-  float snoise3(vec3 v) {
-    const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
-    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-
-    vec3 i = floor(v + dot(v, C.yyy));
-    vec3 x0 = v - i + dot(i, C.xxx);
-
-    vec3 g = step(x0.yzx, x0.xyz);
-    vec3 l = 1.0 - g;
-    vec3 i1 = min(g.xyz, l.zxy);
-    vec3 i2 = max(g.xyz, l.zxy);
-
-    vec3 x1 = x0 - i1 + C.xxx;
-    vec3 x2 = x0 - i2 + C.yyy;
-    vec3 x3 = x0 - D.yyy;
-
-    i = mod289(i);
-    vec4 p = permute(
-      permute(
-        permute(i.z + vec4(0.0, i1.z, i2.z, 1.0))
-        + i.y + vec4(0.0, i1.y, i2.y, 1.0)
-      )
-      + i.x + vec4(0.0, i1.x, i2.x, 1.0)
-    );
-
-    float n_ = 0.142857142857;
-    vec3 ns = n_ * D.wyz - D.xzx;
-
-    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-    vec4 x_ = floor(j * ns.z);
-    vec4 y_ = floor(j - 7.0 * x_);
-
-    vec4 x = x_ * ns.x + ns.yyyy;
-    vec4 y = y_ * ns.x + ns.yyyy;
-    vec4 h = 1.0 - abs(x) - abs(y);
-
-    vec4 b0 = vec4(x.xy, y.xy);
-    vec4 b1 = vec4(x.zw, y.zw);
-
-    vec4 s0 = floor(b0) * 2.0 + 1.0;
-    vec4 s1 = floor(b1) * 2.0 + 1.0;
-    vec4 sh = -step(h, vec4(0.0));
-
-    vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
-    vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
-
-    vec3 p0 = vec3(a0.xy, h.x);
-    vec3 p1 = vec3(a0.zw, h.y);
-    vec3 p2 = vec3(a1.xy, h.z);
-    vec3 p3 = vec3(a1.zw, h.w);
-
-    vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
-    p0 *= norm.x;
-    p1 *= norm.y;
-    p2 *= norm.z;
-    p3 *= norm.w;
-
-    vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
-    m = m * m;
-
-    return 42.0 * dot(
-      m * m,
-      vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3))
-    );
-  }
-
-  float potential(vec3 p, vec3 offset, vec3 drift) {
-    return snoise3(p + offset + drift);
-  }
-
-  vec3 curlNoise(vec3 p, float w, float scale) {
-    float e = 0.02;
-    vec3 drift = vec3(w * 0.04, w * 0.03, w * 0.02);
-    vec3 s = p * scale;
-
-    vec3 dx = vec3(e, 0.0, 0.0);
-    vec3 dy = vec3(0.0, e, 0.0);
-    vec3 dz = vec3(0.0, 0.0, e);
-
-    vec3 ox = vec3(0.0, 17.0, 31.0);
-    vec3 oy = vec3(43.0, 0.0, 19.0);
-    vec3 oz = vec3(23.0, 29.0, 0.0);
-
-    float cx = (
-      (potential(s + dy, oz, drift) - potential(s - dy, oz, drift))
-      - (potential(s + dz, oy, drift) - potential(s - dz, oy, drift))
-    ) / (2.0 * e);
-
-    float cy = (
-      (potential(s + dz, ox, drift) - potential(s - dz, ox, drift))
-      - (potential(s + dx, oz, drift) - potential(s - dx, oz, drift))
-    ) / (2.0 * e);
-
-    float cz = (
-      (potential(s + dx, oy, drift) - potential(s - dx, oy, drift))
-      - (potential(s + dy, ox, drift) - potential(s - dy, ox, drift))
-    ) / (2.0 * e);
-
-    return vec3(cx, cy, cz);
-  }
-
-  vec3 fluidFlow(vec3 p, float w) {
-    float scale = 0.5;
-
-    vec3 flow0 = curlNoise(p, w, scale);
-    vec3 flow1 = curlNoise(p + vec3(2.1, 5.3, 1.7), w * 0.7 + 1.1, scale * 2.0);
-
-    return flow0 * 1.25 + flow1 * 0.65;
-  }
+  ${INSTANCE_GLSL}
 
   void main() {
-    float w = uTime * uFlowSpeed + aPhase;
+    // ── Fetch simulated position + age from the GPGPU state texture ──────────
+    float fi    = float(gl_InstanceID);
+    vec2  simUV = (vec2(mod(fi, uSimW), floor(fi / uSimW)) + 0.5) / uSimRes;
+    vec4  sp    = texture(uSimPos, simUV);
+    vec3  p     = sp.xyz;
+    float age   = sp.w;
+    vec3  cell  = texture(uSimCell, simUV).xyz;
 
-    vec3 offset = fluidFlow(position, w);
-    vec3 morphed = position + offset * uDisplacement;
+    vec3 displaced = p;
 
-    vec4 mvPosition = modelViewMatrix * vec4(morphed, 1.0);
-    gl_Position = projectionMatrix * mvPosition;
+    // ── Orient cube Z-axis along this instance's transformed flow ────────────
+    vec3 flow = normalize(instSampleVel(p, cell) + vec3(1e-4));
+    vec3 up   = abs(flow.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 rgt  = normalize(cross(up, flow));
+    up        = cross(flow, rgt);
+    mat3 orient = mat3(rgt, up, flow);
 
-    float sizeAtten = 90.0 / max(-mvPosition.z, 0.8);
-    gl_PointSize = uPointSize * aSize * sizeAtten;
+    // ── Cube dimensions ──────────────────────────────────────────────────────
+    float taper    = 1.0 - 0.30 * aPhase;
+    float sizeMult = taper * (1.0 + uAudioTreble * AUDIO_TREBLE_SIZE);
+    float baseSize = aSize * CUBE_SCALE * sizeMult * uPointSize;
+    vec3  localPos = position * vec3(baseSize, baseSize, baseSize * uElongation);
+    vec3  worldVertex = displaced + orient * localPos;
+
+    // ── Birth fade-in + fade-out near the kill radius ────────────────────────
+    float birth   = smoothstep(0.0, uBirthTime, age);
+    float dCam    = distance(p, uCamPos);
+    float farFade = 1.0 - smoothstep(uKillRadius * 0.78, uKillRadius, dCam);
+    vFade = birth * farFade;
+
+    vNormal   = normalize(orient * normal);
+    vWorldPos = worldVertex;
+    vViewPos  = (modelViewMatrix * vec4(worldVertex, 1.0)).xyz;
+    vPhase    = aPhase;
+    gl_Position = projectionMatrix * vec4(vViewPos, 1.0);
   }
 `;
 
 export const fragmentShader = /* glsl */ `
+  #define FOG_NEAR ${(SHAPE_SCALE * 0.30).toFixed(3)}
+  #define FOG_FAR  ${(SHAPE_SCALE * 1.45).toFixed(3)}
+
+  uniform vec3  uLightPos;
+  uniform vec3  uLightColor;
+  uniform float uAmbient;
+
+  in vec3  vWorldPos;
+  in vec3  vViewPos;
+  in vec3  vNormal;
+  in float vPhase;
+  in float vFade;
+  out vec4 fragColor;
+
   void main() {
-    vec2 uv = gl_PointCoord - 0.5;
-    float dist = length(uv);
+    vec3  lightDir = normalize(uLightPos - vWorldPos);
+    float diffuse  = max(0.0, dot(vNormal, lightDir));
 
-    if (dist > 0.5) {
-      discard;
-    }
+    vec3  viewDir  = normalize(-vViewPos);
+    vec3  halfVec  = normalize(lightDir + viewDir);
+    float spec     = pow(max(0.0, dot(vNormal, halfVec)), 48.0) * 0.55;
 
-    float alpha = smoothstep(0.5, 0.4, dist);
-    gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
+    float bright   = 0.92 - vPhase * 0.32;
+    vec3  color    = vec3(bright) * uLightColor * (uAmbient + diffuse) + spec;
+
+    // Distance fade: near cubes fully opaque, far cubes transparent
+    float dist  = length(vViewPos);
+    float alpha = 1.0 - smoothstep(FOG_NEAR, FOG_FAR, dist);
+
+    fragColor = vec4(color, alpha * vFade);
   }
 `;

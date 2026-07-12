@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "node-web-audio-api": "^2.0.0",
+    "simplex-noise": "^4.0.3",
     "three": "^0.177.0"
   },
   "devDependencies": {

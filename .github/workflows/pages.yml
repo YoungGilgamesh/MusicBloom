@@ -10,13 +10,15 @@ permissions:
   pages: write
   id-token: write
 
+# New group so a stuck older "pages" run cannot keep this deploy queued.
 concurrency:
-  group: pages
+  group: pages-v2
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: threeJs
@@ -38,6 +40,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

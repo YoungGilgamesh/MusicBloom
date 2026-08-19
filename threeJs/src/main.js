@@ -17,6 +17,7 @@ import { createFlyControls } from './interaction/flyControls.js';
 import { createOrbitControls } from './camera/orbitControls.js';
 import { frameCloudCamera } from './camera/frameCloud.js';
 import { createParticlePicker } from './interaction/particlePick.js';
+import { attachFullscreenToggle } from './interaction/fullscreenToggle.js';
 import { playResultBloom2d, playResultGather2d } from './interaction/resultBloom2d.js';
 import { BloomField } from './interaction/bloomField.js';
 import { createPrecomputedAnalyser } from './audio/audioPrecompute.js';
@@ -44,6 +45,7 @@ import {
   SIM_VOL_HALF,
   MOOD_SMOOTH,
   RENDER_PIXEL_RATIO,
+  RENDER_PIXEL_RATIO_MOBILE,
   FIELD_DOMINANCE,
   FLOW_SPEED_MIN,
   FLOW_SPEED_MAX,
@@ -181,7 +183,16 @@ if (TONE_MAPPING_ACES) {
 // Never exceed the device's native ratio (no point rendering above native).
 // Cover uses COVER_PIXEL_RATIO_MUL on top of that; gameplay restores
 // basePixelRatio when the cover fadeout finishes.
-const basePixelRatio = Math.min(window.devicePixelRatio, RENDER_PIXEL_RATIO);
+// Mobile (`pointer: coarse`) uses a higher cap so phones are less pixelated;
+// desktop stays on RENDER_PIXEL_RATIO.
+function computeBasePixelRatio() {
+  const dpr = window.devicePixelRatio || 1;
+  const cap = window.matchMedia('(pointer: coarse)').matches
+    ? RENDER_PIXEL_RATIO_MOBILE
+    : RENDER_PIXEL_RATIO;
+  return Math.min(dpr, cap);
+}
+const basePixelRatio = computeBasePixelRatio();
 renderer.setPixelRatio(basePixelRatio * COVER_PIXEL_RATIO_MUL);
 {
   const w = window.innerWidth, h = window.innerHeight;
@@ -2286,6 +2297,7 @@ function animate() {
 }
 
 animate();
+attachFullscreenToggle();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2349,6 +2361,14 @@ function ensureCoverUiStyles() {
       top: calc(50% + 188px);
       top: calc(50svh + min(188px, 30svh));
     }
+    .cover-start .cover-img-btn img { width: min(17.6vw, 92px); }
+    .cover-upload .cover-img-btn img { width: min(20.2vw, 109px); }
+    @media (pointer: coarse) {
+      .cover-start .cover-img-btn img { width: min(11vw, 58px); }
+      .cover-upload .cover-img-btn img { width: min(13vw, 68px); }
+      .cover-start { top: calc(50svh + min(96px, 20svh)); }
+      .cover-upload { top: calc(50svh + min(128px, 27svh)); }
+    }
   `;
   document.head.appendChild(s);
 }
@@ -2402,7 +2422,7 @@ function createAdvice() {
   return el;
 }
 
-function createImageButton(src, alt, imgWidth) {
+function createImageButton(src, alt) {
   const el = document.createElement('button');
   el.type = 'button';
   el.className = 'cover-img-btn';
@@ -2410,7 +2430,6 @@ function createImageButton(src, alt, imgWidth) {
   const img = document.createElement('img');
   img.src = src;
   img.alt = alt;
-  img.style.width = imgWidth;
   el.appendChild(img);
   return el;
 }
@@ -2427,7 +2446,7 @@ function createStartButton() {
     transform: 'translate(-50%, -50%)',
     transition: `opacity ${COVER_FADEOUT_TIME}s ease`,
   });
-  wrap.appendChild(createImageButton(assetUrl('/images/cover/start_button.jpg'), 'Start', 'min(17.6vw, 92px)'));
+  wrap.appendChild(createImageButton(assetUrl('/images/cover/start_button.jpg'), 'Start'));
   document.body.appendChild(wrap);
   return wrap;
 }
@@ -2446,7 +2465,7 @@ function createUploadButton() {
     transition: `opacity ${COVER_FADEOUT_TIME}s ease`,
   });
 
-  const el = createImageButton(assetUrl('/images/cover/uploadAudio_button.png'), 'Upload audio', 'min(20.2vw, 109px)');
+  const el = createImageButton(assetUrl('/images/cover/uploadAudio_button.png'), 'Upload audio');
 
   const hint = document.createElement('div');
   Object.assign(hint.style, {

@@ -2574,7 +2574,7 @@ Object.assign(rotateOverlay.style, {
   lineHeight: '2',
   pointerEvents: 'none',
 });
-rotateOverlay.innerHTML = '<div>Rotate your device</div><div>for the better experience</div>';
+rotateOverlay.innerHTML = '<div>Rotate your device</div><div>for better experience</div>';
 document.body.appendChild(rotateOverlay);
 
 function isNarrowWindow() {

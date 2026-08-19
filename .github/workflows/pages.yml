@@ -10,10 +10,10 @@ permissions:
   pages: write
   id-token: write
 
-# New group so a stuck older "pages" run cannot keep this deploy queued.
+# Unique group per run so a stuck queued job cannot block the next deploy.
 concurrency:
-  group: pages-v2
-  cancel-in-progress: true
+  group: pages-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   build:

@@ -123,8 +123,6 @@ import {
   TUTORIAL_FADE_TIME,
   COVER_HINT_SRC,
   COVER_HINT_FADE,
-  COVER_HINT_SIZE,
-  COVER_HINT_BOTTOM,
   COVER_HINT_BREATHE,
   TRANSITION_SPAWN_RAMP_TIME,
   TRANSITION_LIFE_EASE_TIME,
@@ -1495,9 +1493,7 @@ function startCoverHint() {
   Object.assign(el.style, {
     position: 'fixed',
     left: '50%',
-    bottom: COVER_HINT_BOTTOM,
     transform: 'translateX(-50%)',
-    width: COVER_HINT_SIZE,
     height: 'auto',
     pointerEvents: 'none',
     userSelect: 'none',
@@ -2332,22 +2328,42 @@ function ensureCoverUiStyles() {
       animation-name: cover-hint-breathe;
       animation-timing-function: ease-in-out;
       animation-iteration-count: infinite;
+      bottom: max(12px, env(safe-area-inset-bottom, 0px));
+      width: min(16vw, 120px, 14svh);
+    }
+    .cover-mark {
+      top: 50%;
+      top: 50svh;
+      max-height: 28%;
+      max-height: 22svh;
+    }
+    .cover-advice {
+      top: calc(50% + 40px);
+      top: calc(50svh + min(40px, 8svh));
+    }
+    .cover-start {
+      top: calc(50% + 144px);
+      top: calc(50svh + min(144px, 22svh));
+    }
+    .cover-upload {
+      top: calc(50% + 188px);
+      top: calc(50svh + min(188px, 30svh));
     }
   `;
   document.head.appendChild(s);
 }
 
 function createCoverMark(src) {
+  ensureCoverUiStyles();
   const el = document.createElement('img');
   el.src = src;
   el.alt = '';
+  el.className = 'cover-mark';
   Object.assign(el.style, {
     position: 'fixed',
-    top: '50%',
     left: '50%',
     transform: 'translate(-50%, -50%)',
     maxWidth: 'min(48%, 460px)',
-    maxHeight: '28%',
     width: 'auto',
     height: 'auto',
     pointerEvents: 'none',
@@ -2367,12 +2383,13 @@ function createLogoIcon() {
 }
 
 function createAdvice() {
+  ensureCoverUiStyles();
   const el = document.createElement('img');
   el.src = assetUrl('/images/cover/advice.png');
   el.alt = '';
+  el.className = 'cover-advice';
   Object.assign(el.style, {
     position: 'fixed',
-    top: 'calc(50% + 40px)',
     left: 'calc(50% - 6px)',
     transform: 'translateX(-50%)',
     width: 'min(26vw, 165px)',
@@ -2403,9 +2420,9 @@ function createImageButton(src, alt, imgWidth) {
 function createStartButton() {
   ensureCoverUiStyles();
   const wrap = document.createElement('div');
+  wrap.className = 'cover-start';
   Object.assign(wrap.style, {
     position: 'fixed',
-    top: 'calc(50% + 144px)',
     left: '50%',
     transform: 'translate(-50%, -50%)',
     transition: `opacity ${COVER_FADEOUT_TIME}s ease`,
@@ -2421,9 +2438,9 @@ function createStartButton() {
 function createUploadButton() {
   ensureCoverUiStyles();
   const wrap = document.createElement('div');
+  wrap.className = 'cover-upload';
   Object.assign(wrap.style, {
     position: 'fixed',
-    top: 'calc(50% + 188px)',
     left: '50%',
     transform: 'translate(-50%, -50%)',
     transition: `opacity ${COVER_FADEOUT_TIME}s ease`,

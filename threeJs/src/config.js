@@ -853,8 +853,6 @@ export const TUTORIAL_FADE_TIME = 0.8;       // seconds: hint fade in / out
 // Cover-page look-around hint — pinned to the bottom, breathes, fades out on first drag.
 export const COVER_HINT_SRC = assetUrl('/images/cover/hint.png');
 export const COVER_HINT_FADE = 0.7;          // seconds: dismiss fade-out
-export const COVER_HINT_SIZE = 'min(16vw, 120px)';
-export const COVER_HINT_BOTTOM = '28px';
 export const COVER_HINT_BREATHE = 2.8;       // seconds per opacity breath cycle
 export const TRANSITION_SPAWN_RAMP_TIME = 10.0; // seconds: sparse → full gameplay particle density
 // Each particle/trail/dot's OWN individual fade-in duration, in real seconds —

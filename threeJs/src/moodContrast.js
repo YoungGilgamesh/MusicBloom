@@ -9,8 +9,8 @@
  * 0→0, 0.5→0.5, 1→1.  amount = 1 is identity; amount > 1 steepens the curve so
  * highs rise toward 1 and lows fall toward 0, monotonically (no clamping flats).
  *
- * Shared by the debug presets and (later) the audio-extraction path so both
- * generate shapes with the same punch.
+ * Used only for the baked cloud shape (applyBaseShape). Trail / sky colour
+ * read the raw fingerprint so this S-curve does not pull hues toward magenta.
  */
 
 import { MOOD_CONTRAST } from './config.js';

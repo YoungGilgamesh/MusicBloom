@@ -1,55 +1,78 @@
 /**
  * fields/combine.js — combination + sampling layer for all 6 mood fields.
  *
- * Combination model — "Option A: Dominant Warp + Full Superposition":
- *   • Every active field contributes to the combined curl (linear superposition)
- *     evaluated at the (possibly warped) position.
- *   • Only the strongest 1–2 fields (chosen by the caller via `warpOrder`) deform
+ * Combination model — "Dominance-weighted warp + superposition":
+ *   • Every active field contributes a curl to the combined flow.  Each field's
+ *     curl is NORMALISED to a unit direction first, then weighted by
+ *     wᵢ = paramᵢ^DOMINANCE — so the WEIGHT (not the incidental finite-difference
+ *     magnitude) controls how much a field steers the flow.  A larger DOMINANCE
+ *     concentrates the direction on the strongest 1–2 fields (matching the top-2
+ *     warpers), so combined shapes stay legible instead of averaging into mush.
+ *   • The strongest 1–2 fields (chosen by the caller via `warpOrder`) also deform
  *     the coordinate space itself through domain warping.
+ *   • All 6 fields now carry a flow (texture & bpm gained curl-noise fields), so
+ *     the dominance weighting applies uniformly across the whole set.
  *
  * Sampling — `sampleAll6Cloud`:
- *   • Particle budget is split proportionally across the 6 fields.
+ *   • Particle budget is split by the same dominance weights (paramᵢ^DOMINANCE),
+ *     so the dominant field(s) stay dense instead of every field getting a thin
+ *     equal slice.
  *   • Energy seeds use a dedicated upward fire integrator (`integrateFireLine`).
- *   • Brightness / heaviness / dynamism seeds use the shared flow integrator
- *     (`integrateWarpedAll`).
- *   • Texture and BPM are rejection-sampled onto their isosurfaces.
+ *   • Brightness / heaviness / dynamism / texture / bpm seeds use the shared flow
+ *     integrator (`integrateWarpedAll`); texture & bpm are rejection-sampled onto
+ *     their isosurfaces, then advected along the combined flow like the rest.
+ *
+ * Everything below passes the field bundle `F` (see buildFieldBundle) rather than
+ * long positional arg lists — `F` carries the descriptors AND the dominance
+ * weights `F.W = [e,b,t,h,d,bpm]`.
  */
 
-import { SHAPE_SCALE, PARTICLE_SIZE_MIN, PARTICLE_SIZE_RANGE } from '../../config.js';
+import { SHAPE_SCALE, FIELD_DOMINANCE } from '../../config.js';
 import { WARP_MAX } from './shared.js';
 import { generateEnergyPoles, fireVelocity, curlEnergy } from './energy.js';
 import { generateSpokes, spokeFieldSigma, spokePsi, curlBrightness } from './brightness.js';
-import { fbmFreq, fbmOctaves, fbmField, texturePsi } from './texture.js';
+import { fbmFreq, fbmOctaves, fbmField, texturePsi, curlTexture } from './texture.js';
 import { generateStreamChannels, heavinessPsi, curlHeaviness } from './heaviness.js';
 import { generateHelixAxes, helixSigma, helixPitchK, helixPsi, curlHelix } from './dynamism.js';
-import { normBpm, generateWaveSources, bpmWavenumber, interferenceAndGrad } from './bpm.js';
+import { normBpm, generateWaveSources, bpmWavenumber, interferenceAndGrad, curlBpm } from './bpm.js';
 
-// Combined curl using linearity: curl(e·Ψe+b·Ψb+h·Ψh+d·Ψd) = e·curlE + b·curlB + …
-// Guards skip zero-value fields, saving cost when params are inactive.
-// Note: curlEnergy returns the fire velocity directly (not a mathematical curl).
-function curlAll4EBHD(x, y, z, e, b, h, d, ePoles, spokes, sb2, channels, sh2, helixAxes, hsigma2, hpitchK) {
+// Dominance-weighted, direction-normalised superposition of all 6 field curls.
+// Each field's curl is reduced to a UNIT direction, then scaled by its weight
+// F.W[i] = paramᵢ^DOMINANCE.  Result magnitude encodes alignment (fields that
+// agree flow fast; conflicting fields cancel → slow) — the baker normalises it.
+// Guards skip fields whose weight is ~0, saving cost when params are inactive.
+function curlAll6(x, y, z, F) {
+  const W = F.W;
   let vx = 0, vy = 0, vz = 0;
-  if (e > 0.01) { const c = curlEnergy(x, y, z, ePoles);                        vx+=c[0]*e; vy+=c[1]*e; vz+=c[2]*e; }
-  if (b > 0.01) { const c = curlBrightness(x, y, z, spokes, sb2);               vx+=c[0]*b; vy+=c[1]*b; vz+=c[2]*b; }
-  if (h > 0.01) { const c = curlHeaviness(x, y, z, channels, sh2, h);           vx+=c[0]*h; vy+=c[1]*h; vz+=c[2]*h; }
-  if (d > 0.01) { const c = curlHelix(x, y, z, helixAxes, hsigma2, hpitchK);    vx+=c[0]*d; vy+=c[1]*d; vz+=c[2]*d; }
+  const add = (c, w) => {
+    const l = Math.sqrt(c[0]*c[0] + c[1]*c[1] + c[2]*c[2]);
+    if (l < 1e-8) return;
+    const s = w / l;
+    vx += c[0]*s; vy += c[1]*s; vz += c[2]*s;
+  };
+  if (W[0] > 1e-4) add(curlEnergy(x, y, z, F.ePoles),                         W[0]);
+  if (W[1] > 1e-4) add(curlBrightness(x, y, z, F.spokes, F.sb2),              W[1]);
+  if (W[2] > 1e-4) add(curlTexture(x, y, z, F.texP),                          W[2]);
+  if (W[3] > 1e-4) add(curlHeaviness(x, y, z, F.channels, F.sh2, F.heaviness),W[3]);
+  if (W[4] > 1e-4) add(curlHelix(x, y, z, F.helixAxes, F.hsigma2, F.hpitchK), W[4]);
+  if (W[5] > 1e-4) add(curlBpm(x, y, z, F.bpmSrc, F.bpmK),                    W[5]);
   return [vx, vy, vz];
 }
 
-// Apply warp steps in the order given.  Each warp direction is normalised so
-// the displacement amplitude is purely  param_value × WARP_MAX.
-// texP = { freq, oct } for FBM isosurface texture field.
-// ePoles: precomputed from generateEnergyPoles().
-function domainWarpPosOrdered(x, y, z, warpOrder, e, b, t, h, d, bpmSrc, bpmK, bpmN, ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK) {
+// Apply warp steps in the given order (the top-1–2 fields).  Each warp direction
+// is normalised so the displacement amplitude is purely  param_value × WARP_MAX.
+// Warp amplitude uses the RAW param (not the dominance weight) — it's a coordinate
+// displacement, independent of the curl-direction weighting.
+function domainWarpPos(x, y, z, F, warpOrder) {
   let px = x, py = y, pz = z;
   for (const p of warpOrder) {
     let wx, wy, wz, amp;
-    if      (p === 'energy'    && e    > 0.01) { const ef=fireVelocity(px,py,pz,ePoles); wx=ef[0]; wy=ef[1]; wz=ef[2]; amp=e; }
-    else if (p === 'brightness'&& b    > 0.01) { wx=spokePsi(0,px,py,pz,spokes,sb2);         wy=spokePsi(1,px,py,pz,spokes,sb2);         wz=spokePsi(2,px,py,pz,spokes,sb2);         amp=b; }
-    else if (p === 'texture'   && t    > 0.01) { wx=texturePsi(0,px,py,pz,texP);              wy=texturePsi(1,px,py,pz,texP);              wz=texturePsi(2,px,py,pz,texP);              amp=t; }
-    else if (p === 'heaviness' && h    > 0.01) { wx=heavinessPsi(0,px,py,pz,channels,sh2,h); wy=heavinessPsi(1,px,py,pz,channels,sh2,h); wz=heavinessPsi(2,px,py,pz,channels,sh2,h); amp=h; }
-    else if (p === 'dynamism'  && d    > 0.01) { wx=helixPsi(0,px,py,pz,helixAxes,hsigma2,hpitchK); wy=helixPsi(1,px,py,pz,helixAxes,hsigma2,hpitchK); wz=helixPsi(2,px,py,pz,helixAxes,hsigma2,hpitchK); amp=d; }
-    else if (p === 'bpm'       && bpmN > 0.01) { const ig=interferenceAndGrad(px,py,pz,bpmSrc,bpmK); wx=ig.gx; wy=ig.gy; wz=ig.gz; amp=bpmN; }
+    if      (p === 'energy'     && F.energy     > 0.01) { const ef=fireVelocity(px,py,pz,F.ePoles); wx=ef[0]; wy=ef[1]; wz=ef[2]; amp=F.energy; }
+    else if (p === 'brightness' && F.brightness > 0.01) { wx=spokePsi(0,px,py,pz,F.spokes,F.sb2);         wy=spokePsi(1,px,py,pz,F.spokes,F.sb2);         wz=spokePsi(2,px,py,pz,F.spokes,F.sb2);         amp=F.brightness; }
+    else if (p === 'texture'    && F.texture    > 0.01) { wx=texturePsi(0,px,py,pz,F.texP);              wy=texturePsi(1,px,py,pz,F.texP);              wz=texturePsi(2,px,py,pz,F.texP);              amp=F.texture; }
+    else if (p === 'heaviness'  && F.heaviness  > 0.01) { wx=heavinessPsi(0,px,py,pz,F.channels,F.sh2,F.heaviness); wy=heavinessPsi(1,px,py,pz,F.channels,F.sh2,F.heaviness); wz=heavinessPsi(2,px,py,pz,F.channels,F.sh2,F.heaviness); amp=F.heaviness; }
+    else if (p === 'dynamism'   && F.dynamism   > 0.01) { wx=helixPsi(0,px,py,pz,F.helixAxes,F.hsigma2,F.hpitchK); wy=helixPsi(1,px,py,pz,F.helixAxes,F.hsigma2,F.hpitchK); wz=helixPsi(2,px,py,pz,F.helixAxes,F.hsigma2,F.hpitchK); amp=F.dynamism; }
+    else if (p === 'bpm'        && F.bpmN       > 0.01) { const ig=interferenceAndGrad(px,py,pz,F.bpmSrc,F.bpmK); wx=ig.gx; wy=ig.gy; wz=ig.gz; amp=F.bpmN; }
     else continue;
     const wm = Math.sqrt(wx*wx+wy*wy+wz*wz)+1e-8;
     px+=(wx/wm)*amp*WARP_MAX; py+=(wy/wm)*amp*WARP_MAX; pz+=(wz/wm)*amp*WARP_MAX;
@@ -57,12 +80,10 @@ function domainWarpPosOrdered(x, y, z, warpOrder, e, b, t, h, d, bpmSrc, bpmK, b
   return [px, py, pz];
 }
 
-// Shared flow integrator for brightness / heaviness / dynamism seeds.
-// texP = { freq, oct } for FBM isosurface texture field.
-// ePoles: precomputed from generateEnergyPoles() — passed through to curlAll4EBHD.
-function integrateWarpedAll(x0, y0, z0, warpOrder, e, b, t, h, d, bpmSrc, bpmK, bpmN, ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK) {
+// Shared flow integrator for brightness / heaviness / dynamism / texture / bpm seeds.
+function integrateWarpedAll(x0, y0, z0, F) {
   const steps     = 10;
-  const total     = e + b + h + d + 1e-8;
+  const total     = F.energy + F.brightness + F.heaviness + F.dynamism + 1e-8;
   const stepSize  = 0.038 + (total / 4) * 0.010;
   const maxR2     = (SHAPE_SCALE * 1.38) ** 2;
   const maxTravel = steps * stepSize;
@@ -72,8 +93,8 @@ function integrateWarpedAll(x0, y0, z0, warpOrder, e, b, t, h, d, bpmSrc, bpmK, 
   let traveled = 0;
 
   for (let i = 0; i < steps; i++) {
-    const [wx, wy, wz] = domainWarpPosOrdered(x, y, z, warpOrder, e, b, t, h, d, bpmSrc, bpmK, bpmN, ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK);
-    let [vx, vy, vz]   = curlAll4EBHD(wx, wy, wz, e, b, h, d, ePoles, spokes, sb2, channels, sh2, helixAxes, hsigma2, hpitchK);
+    const [wx, wy, wz] = domainWarpPos(x, y, z, F, F.warpOrder);
+    const [vx, vy, vz] = curlAll6(wx, wy, wz, F);
 
     const len = Math.sqrt(vx*vx+vy*vy+vz*vz);
     if (len < 1e-6) break;
@@ -97,23 +118,21 @@ function integrateWarpedAll(x0, y0, z0, warpOrder, e, b, t, h, d, bpmSrc, bpmK, 
 // • Velocity = fire field (up + turbulence), evaluated at domain-warped position
 // • Energy excluded from its own warp chain — fire tongues don't self-distort
 //
-function integrateFireLine(x0, y0, z0, warpOrder, e, b, t, h, d,
-    bpmSrc, bpmK, bpmN, ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK) {
+function integrateFireLine(x0, y0, z0, F) {
   const steps     = 18;
   const stepSize  = 0.068;
   const maxR2     = (SHAPE_SCALE * 1.45) ** 2;
   const maxTravel = steps * stepSize;
 
-  const warpNoE = warpOrder.filter(p => p !== 'energy');
+  const warpNoE = F.warpOrder.filter(p => p !== 'energy');
 
   let x = x0, y = y0, z = z0;
   let lvx = 0, lvy = 1, lvz = 0;
   let traveled = 0;
 
   for (let i = 0; i < steps; i++) {
-    const [wx, wy, wz] = domainWarpPosOrdered(x, y, z, warpNoE,
-      e, b, t, h, d, bpmSrc, bpmK, bpmN, ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK);
-    const fv  = fireVelocity(wx, wy, wz, ePoles);
+    const [wx, wy, wz] = domainWarpPos(x, y, z, F, warpNoE);
+    const fv  = fireVelocity(wx, wy, wz, F.ePoles);
     const len = Math.sqrt(fv[0]*fv[0]+fv[1]*fv[1]+fv[2]*fv[2]);
     if (len < 1e-6) break;
     const inv = 1 / len;
@@ -129,16 +148,27 @@ function integrateFireLine(x0, y0, z0, warpOrder, e, b, t, h, d,
   return [x, y, z, lvx/fl, lvy/fl, lvz/fl, phase];
 }
 
+// Dominance weights: wᵢ = paramᵢ^dominance for all 6 fields (bpm uses bpmN).
+// Higher `dominance` sharpens the gap so the strongest 1–2 fields dominate both
+// the flow direction (curlAll6) and the particle budget (sampleAll6Cloud).
+function fieldWeights(e, b, t, h, d, bpmN, dominance) {
+  return [
+    Math.pow(e, dominance), Math.pow(b, dominance), Math.pow(t, dominance),
+    Math.pow(h, dominance), Math.pow(d, dominance), Math.pow(bpmN, dominance),
+  ];
+}
+
 // ── Field bundle ──────────────────────────────────────────────────────────────
 // Generates every field descriptor once for a given mood.  All generators are
 // deterministic (seeded RNG), so the seed-sampler (main thread) and the velocity
 // baker (worker) produce the *identical* field from the same params — flow and
-// spawn positions always agree.
-export function buildFieldBundle(energy, brightness, texture, heaviness, dynamism, bpm, warpOrder) {
+// spawn positions always agree.  Carries the dominance weights `W` too.
+export function buildFieldBundle(energy, brightness, texture, heaviness, dynamism, bpm, warpOrder, dominance = FIELD_DOMINANCE) {
   const bpmN = normBpm(bpm);
   return {
     warpOrder,
     energy, brightness, texture, heaviness, dynamism, bpmN,
+    W:         fieldWeights(energy, brightness, texture, heaviness, dynamism, bpmN, dominance),
     ePoles:    generateEnergyPoles(energy),
     spokes:    generateSpokes(brightness),
     sb2:       spokeFieldSigma(brightness) ** 2,
@@ -154,45 +184,34 @@ export function buildFieldBundle(energy, brightness, texture, heaviness, dynamis
 }
 
 // Combined flow velocity at a point — the exact per-step velocity used by the
-// streamline integrator: superposition curl evaluated at the domain-warped
+// streamline integrator: dominance-weighted curl evaluated at the domain-warped
 // position.  This is what gets baked into the velocity volume.
 export function combinedVelocity(x, y, z, F) {
-  const [wx, wy, wz] = domainWarpPosOrdered(
-    x, y, z, F.warpOrder,
-    F.energy, F.brightness, F.texture, F.heaviness, F.dynamism,
-    F.bpmSrc, F.bpmK, F.bpmN,
-    F.ePoles, F.spokes, F.sb2, F.texP, F.channels, F.sh2, F.helixAxes, F.hsigma2, F.hpitchK);
-  return curlAll4EBHD(
-    wx, wy, wz, F.energy, F.brightness, F.heaviness, F.dynamism,
-    F.ePoles, F.spokes, F.sb2, F.channels, F.sh2, F.helixAxes, F.hsigma2, F.hpitchK);
+  const [wx, wy, wz] = domainWarpPos(x, y, z, F, F.warpOrder);
+  return curlAll6(wx, wy, wz, F);
 }
 
-// ── Master sampler — all 6 fields, dominant-warp + full superposition ─────────
-export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, dynamism, bpm, warpOrder) {
-  const bpmN   = normBpm(bpm);
-  const total6 = energy + brightness + texture + heaviness + dynamism + bpmN + 1e-8;
+// ── Master sampler — all 6 fields, dominance-weighted warp + superposition ────
+export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, dynamism, bpm, warpOrder, dominance = FIELD_DOMINANCE) {
+  // Precompute all field descriptors + dominance weights once.  Identical to what
+  // the velocity baker uses (see buildFieldBundle) so flow and seeds always agree.
+  const F = buildFieldBundle(energy, brightness, texture, heaviness, dynamism, bpm, warpOrder, dominance);
 
-  const bpmC  = Math.round(count * bpmN / total6);
-  const intC  = count - bpmC;
+  // Particle budget by the same dominance weights → the dominant field(s) stay
+  // dense; weak fields become thin accents instead of equal slices.
+  const W    = F.W;
+  const wsum = W[0] + W[1] + W[2] + W[3] + W[4] + W[5] + 1e-8;
+  const eC = Math.round(count * W[0] / wsum);
+  const bC = Math.round(count * W[1] / wsum);
+  const tC = Math.round(count * W[2] / wsum);
+  const hC = Math.round(count * W[3] / wsum);
+  const dC = Math.round(count * W[4] / wsum);
+  const bpmC = count - (eC + bC + tC + hC + dC);
 
-  const ebthd = energy + brightness + texture + heaviness + dynamism + 1e-8;
-  const eC = Math.round(intC * energy     / ebthd);
-  const bC = Math.round(intC * brightness / ebthd);
-  const tC = Math.round(intC * texture    / ebthd);
-  const hC = Math.round(intC * heaviness  / ebthd);
-  const dC = intC - eC - bC - tC - hC;
-
-  // Precompute all field descriptors once — shared across every integrate call.
-  // Identical to what the velocity baker uses (see buildFieldBundle).
-  const { ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK, bpmSrc, bpmK }
-    = buildFieldBundle(energy, brightness, texture, heaviness, dynamism, bpm, warpOrder);
+  const { ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK, bpmSrc, bpmK } = F;
 
   // Convenience alias so every integrateWarpedAll call is identical in shape.
-  const iwa = (x0, y0, z0) =>
-    integrateWarpedAll(x0, y0, z0, warpOrder,
-      energy, brightness, texture, heaviness, dynamism,
-      bpmSrc, bpmK, bpmN,
-      ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK);
+  const iwa = (x0, y0, z0) => integrateWarpedAll(x0, y0, z0, F);
 
   const positions = new Float32Array(count * 3);
   const normals   = new Float32Array(count * 3);
@@ -210,10 +229,7 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
     const tongueR   = SHAPE_SCALE * (0.07 + energy * 0.05);
     const perTongue = Math.floor(eC / nTongues);
     const eStart    = off;
-    const iwe = (x0, y0, z0) =>
-      integrateFireLine(x0, y0, z0, warpOrder,
-        energy, brightness, texture, heaviness, dynamism,
-        bpmSrc, bpmK, bpmN, ePoles, spokes, sb2, texP, channels, sh2, helixAxes, hsigma2, hpitchK);
+    const iwe = (x0, y0, z0) => integrateFireLine(x0, y0, z0, F);
     for (let ti = 0; ti < nTongues; ti++) {
       const [bx, by, bz] = bases[ti];
       const nCount   = ti < nTongues-1 ? perTongue : eStart+eC-off;
@@ -228,7 +244,7 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
         positions[off*3]=fx;positions[off*3+1]=fy;positions[off*3+2]=fz;
         normals[off*3]=nx;normals[off*3+1]=ny;normals[off*3+2]=nz;
         phases[off] = 1.0 - phase;   // invert: bright base, dim tip
-        sizes[off]  = PARTICLE_SIZE_MIN + Math.random() * PARTICLE_SIZE_RANGE;
+        sizes[off]  = Math.random();
         off++;
       }
     }
@@ -252,7 +268,7 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
         const [fx,fy,fz,nx,ny,nz,phase]=iwa(x0,y0,z0);
         positions[off*3]=fx;positions[off*3+1]=fy;positions[off*3+2]=fz;
         normals[off*3]=nx;normals[off*3+1]=ny;normals[off*3+2]=nz;
-        phases[off]=phase;sizes[off]=PARTICLE_SIZE_MIN+Math.random()*PARTICLE_SIZE_RANGE;off++;
+        phases[off]=phase;sizes[off]=Math.random();off++;
       }
     }
   }
@@ -275,10 +291,10 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
       positions[off*3]=fx; positions[off*3+1]=fy; positions[off*3+2]=fz;
       normals[off*3]=nx;   normals[off*3+1]=ny;   normals[off*3+2]=nz;
       phases[off] = Math.abs(f) / band;
-      sizes[off]  = PARTICLE_SIZE_MIN + Math.random() * PARTICLE_SIZE_RANGE;
+      sizes[off]  = Math.random();
       off++; tp++;
     }
-    if (tp>0){while(off<tStart+tC){const src=tStart+Math.floor(Math.random()*tp);positions[off*3]=positions[src*3];positions[off*3+1]=positions[src*3+1];positions[off*3+2]=positions[src*3+2];normals[off*3]=normals[src*3];normals[off*3+1]=normals[src*3+1];normals[off*3+2]=normals[src*3+2];phases[off]=phases[src];sizes[off]=PARTICLE_SIZE_MIN+Math.random()*PARTICLE_SIZE_RANGE;off++;}}
+    if (tp>0){while(off<tStart+tC){const src=tStart+Math.floor(Math.random()*tp);positions[off*3]=positions[src*3];positions[off*3+1]=positions[src*3+1];positions[off*3+2]=positions[src*3+2];normals[off*3]=normals[src*3];normals[off*3+1]=normals[src*3+1];normals[off*3+2]=normals[src*3+2];phases[off]=phases[src];sizes[off]=Math.random();off++;}}
   }
 
   // ── Heaviness seeds (stream channels) ───────────────────────────────────────
@@ -294,7 +310,7 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
         const [fx,fy,fz,nx,ny,nz,phase]=iwa(x0,y0,z0);
         positions[off*3]=fx;positions[off*3+1]=fy;positions[off*3+2]=fz;
         normals[off*3]=nx;normals[off*3+1]=ny;normals[off*3+2]=nz;
-        phases[off]=phase;sizes[off]=PARTICLE_SIZE_MIN+Math.random()*PARTICLE_SIZE_RANGE;off++;
+        phases[off]=phase;sizes[off]=Math.random();off++;
       }
     }
   }
@@ -317,7 +333,7 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
         const [fx,fy,fz,nx,ny,nz,phase]=iwa(x0,y0,z0);
         positions[off*3]=fx;positions[off*3+1]=fy;positions[off*3+2]=fz;
         normals[off*3]=nx;normals[off*3+1]=ny;normals[off*3+2]=nz;
-        phases[off]=Math.abs(tt)/halfL;sizes[off]=PARTICLE_SIZE_MIN+Math.random()*PARTICLE_SIZE_RANGE;off++;
+        phases[off]=Math.abs(tt)/halfL;sizes[off]=Math.random();off++;
       }
     }
   }
@@ -337,10 +353,10 @@ export function sampleAll6Cloud(count, energy, brightness, texture, heaviness, d
       const gl=Math.sqrt(gx*gx+gy*gy+gz*gz)+1e-8;
       positions[off*3]=x;positions[off*3+1]=y;positions[off*3+2]=z;
       normals[off*3]=gx/gl;normals[off*3+1]=gy/gl;normals[off*3+2]=gz/gl;
-      phases[off]=1-(f-THRESH)/(1-THRESH);sizes[off]=PARTICLE_SIZE_MIN+Math.random()*PARTICLE_SIZE_RANGE;
+      phases[off]=1-(f-THRESH)/(1-THRESH);sizes[off]=Math.random();
       off++;tp++;
     }
-    if (tp>0){const jitter=SHAPE_SCALE*0.018;while(off<bStart+bpmC){const src=bStart+Math.floor(Math.random()*tp);positions[off*3]=positions[src*3]+(Math.random()-0.5)*jitter;positions[off*3+1]=positions[src*3+1]+(Math.random()-0.5)*jitter;positions[off*3+2]=positions[src*3+2]+(Math.random()-0.5)*jitter;normals[off*3]=normals[src*3];normals[off*3+1]=normals[src*3+1];normals[off*3+2]=normals[src*3+2];phases[off]=phases[src];sizes[off]=PARTICLE_SIZE_MIN+Math.random()*PARTICLE_SIZE_RANGE;off++;}}
+    if (tp>0){const jitter=SHAPE_SCALE*0.018;while(off<bStart+bpmC){const src=bStart+Math.floor(Math.random()*tp);positions[off*3]=positions[src*3]+(Math.random()-0.5)*jitter;positions[off*3+1]=positions[src*3+1]+(Math.random()-0.5)*jitter;positions[off*3+2]=positions[src*3+2]+(Math.random()-0.5)*jitter;normals[off*3]=normals[src*3];normals[off*3+1]=normals[src*3+1];normals[off*3+2]=normals[src*3+2];phases[off]=phases[src];sizes[off]=Math.random();off++;}}
   }
 
   return { positions, normals, phases, sizes };

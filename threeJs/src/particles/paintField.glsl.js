@@ -20,29 +20,42 @@
  * the silhouette (spikes/petals are sparse, curl/vortex fill space). Mood picks
  * the dominant + one partner per bloom (see bloomField.js); the rest never run.
  *
- * Camera-windowed active set uploaded as three vec4 arrays:
+ * Camera-windowed active set uploaded as five vec4 arrays:
  *     uBloomA[i] = (center.xyz, radius)
- *     uBloomB[i] = (burstMag, seed, shapeWeight, _)   // time-envelopes on CPU
- *     uBloomC[i] = (archA, archB, blendAB, _)          // shape selection
- * burstMag decays to 0; shapeWeight ramps to 1 and persists (a 0..1 blend factor).
+ *     uBloomB[i] = (burstMag, seed, shapeWeight, shell)  // time-envelopes on CPU
+ *     uBloomC[i] = (archA, archB, blendAB, openness)      // shape selection
+ *     uBloomD[i] = (outward, shapeAmt, fieldFreq, detail) // per-bloom modulators
+ *     uBloomE[i] = (colorH, colorS, colorL, colorRadius)  // permanent ink stain (ribbons + meshes + dots)
+ * burstMag decays to 0; shapeWeight ramps then LRU-fades. Colour radius grows wider /
+ * slower than shape and outlives shape fade (see bloomField.js).
  *
  * The including shader declares nothing else — this block declares its uniforms.
  * Requires GLSL3.
  */
-import { BLOOM_MAX_ACTIVE } from '../config.js';
+import {
+  BLOOM_MAX_ACTIVE,
+  PAINT_BURST_SHAPED,
+  PAINT_BURST_WIDEN,
+  PAINT_DRIFT_SHAPED,
+  PAINT_DRIFT_RADIAL,
+} from '../config.js';
 
 export const PAINT_GLSL = /* glsl */ `
   #define MAX_BLOOMS ${BLOOM_MAX_ACTIVE}
+  #define PAINT_BURST_SHAPED ${PAINT_BURST_SHAPED.toFixed(4)}
+  #define PAINT_BURST_WIDEN ${PAINT_BURST_WIDEN.toFixed(4)}
+  #define PAINT_DRIFT_SHAPED ${PAINT_DRIFT_SHAPED.toFixed(4)}
+  #define PAINT_DRIFT_RADIAL ${PAINT_DRIFT_RADIAL.toFixed(4)}
   uniform int  uBloomCount;
+  uniform float uPaintStrength;       // scales the whole paint deviation (1 = full, 0 = off)
+  uniform float uPaintTime;           // elapsed seconds — drives the LIVING field animation
+  uniform float uPaintSwirl;          // rad/sec the shape frame rotates (swirl); 0 = frozen
+  uniform float uPaintEvolve;         // world units/sec the noise domain drifts (evolve/morph)
+  uniform float uPaintDrift;          // post-surge outward creep speed (trails only; 0 for meshes)
   uniform vec4 uBloomA[MAX_BLOOMS];   // xyz = center, w = radius
-  uniform vec4 uBloomB[MAX_BLOOMS];   // x = burstMag, y = seed, z = shapeWeight
-  uniform vec4 uBloomC[MAX_BLOOMS];   // x = archA, y = archB, z = blendAB
-
-  uniform float uPaintOutward;   // burst (outward pop) strength
-  uniform float uPaintCurl;      // shape override weight (0 = base flow, 1 = fully redirected)
-  uniform float uPaintCurlFreq;  // field scale (world space)
-  uniform float uPaintDetail;    // sharpness/turbulence (0 smooth .. 1 jagged)
-  uniform float uPaintShell;     // burst profile: 0 pocket .. 1 shell
+  uniform vec4 uBloomB[MAX_BLOOMS];   // x = burstMag, y = seed, z = shapeWeight, w = shell
+  uniform vec4 uBloomC[MAX_BLOOMS];   // x = archA, y = archB, z = blendAB, w = openness
+  uniform vec4 uBloomD[MAX_BLOOMS];   // x = outward, y = shapeAmt, z = fieldFreq, w = detail
 
   float pkHash(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -88,6 +101,28 @@ export const PAINT_GLSL = /* glsl */ `
     vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     t = normalize(cross(up, n));
     b = cross(n, t);
+  }
+
+  // Animate the persistent field: return a SLOWLY MOVING sampling coordinate for the
+  // shape. The bloom-local offset r is rotated about a per-bloom axis (SWIRL) and the
+  // noise domain is drifted over time (EVOLVE), so the archetype pattern keeps turning
+  // and morphing → streamlines move → ribbons flow through a living whirlpool. Only the
+  // SHAPE sampling uses this; the radial outward pop + spatial falloff keep the raw r.
+  vec3 paintWarp(vec3 r, float seed) {
+    // SWIRL: rotate the offset about a per-bloom axis. Geometry-safe (preserves length),
+    // so vortex/torus just spin coherently; noise archetypes turn.
+    vec3 ax  = randAxis(seed + 3.1);
+    float ang = uPaintTime * uPaintSwirl;
+    float c = cos(ang), s = sin(ang);
+    vec3 rot = r * c + cross(ax, r) * s + ax * dot(ax, r) * (1.0 - c);
+    // EVOLVE: a BOUNDED slow wander of the domain (two decorrelated sines → non-repeating
+    // morph). Bounded on purpose — a linearly-growing drift would push r arbitrarily far
+    // and DEGENERATE the geometric archetypes (vortex/torus). Amplitude = uPaintEvolve.
+    vec3 ax2 = randAxis(seed + 9.7);
+    vec3 ax3 = randAxis(seed + 21.3);
+    vec3 drift = ax2 * sin(uPaintTime * 0.31 + seed)
+               + ax3 * sin(uPaintTime * 0.17 + seed * 1.7);
+    return rot + drift * uPaintEvolve;
   }
 
   // ── Archetypes ──────────────────────────────────────────────────────────────
@@ -224,9 +259,8 @@ export const PAINT_GLSL = /* glsl */ `
   //           archetypes steer == pres, but spikes steer broadly (=1) so gap
   //           particles are pulled ONTO the crest lines and converge into bolts.
   // t = normalized radius (0 center .. 1 edge), openness = rose unfurl 0..1.
-  vec3 archetypeDir(int idx, vec3 r, float t, float openness, float seed, out float pres, out float steer) {
-    float freq   = uPaintCurlFreq;
-    float detail = uPaintDetail;
+  // freq/detail are per-bloom (from uBloomD), so each bloom shapes its own field.
+  vec3 archetypeDir(int idx, vec3 r, float t, float openness, float seed, float freq, float detail, out float pres, out float steer) {
     vec3 dir;
     if (idx == 1)      { dir = archVortex(r, seed, pres);                       steer = pres; }
     else if (idx == 2) { dir = archLightning(r, freq, detail, seed, pres);      steer = 1.0;  }
@@ -236,6 +270,26 @@ export const PAINT_GLSL = /* glsl */ `
     return dir;
   }
 
+  // How strongly a world point sits inside the PERSISTENT mark (0 = outside all blooms,
+  // 1 = dead centre of a fully-settled bloom). Uses the same smooth spatial falloff and
+  // the persistent shapeWeight (NOT the transient burst), so it tracks the lasting shape.
+  // The trail sim uses this to stretch the lifetime of heads sitting in the mark.
+  float paintInfluence(vec3 p) {
+    float inf = 0.0;
+    for (int i = 0; i < MAX_BLOOMS; i++) {
+      if (i >= uBloomCount) break;
+      vec3  c      = uBloomA[i].xyz;
+      float radius = uBloomA[i].w;
+      float shapeW = uBloomB[i].z;
+      float d = length(p - c);
+      if (d >= radius) continue;
+      float t = d / radius;
+      float w = (1.0 - t) * (1.0 - t);
+      inf = max(inf, w * shapeW);
+    }
+    return inf;
+  }
+
   // Redirect the base flow through the painted shape + add the transient burst.
   vec3 paintApply(vec3 p, vec3 baseVel) {
     float baseSpeed = length(baseVel);
@@ -243,6 +297,7 @@ export const PAINT_GLSL = /* glsl */ `
     vec3  accum = vec3(0.0);   // presence-weighted shape direction
     float wSum  = 0.0;         // total redirect weight (clamped later)
     vec3  burst = vec3(0.0);   // transient additive impulse
+    vec3  creep = vec3(0.0);   // persistent post-surge outward drift (trails only)
 
     for (int i = 0; i < MAX_BLOOMS; i++) {
       if (i >= uBloomCount) break;
@@ -255,6 +310,12 @@ export const PAINT_GLSL = /* glsl */ `
       int   archB    = int(uBloomC[i].y + 0.5);
       float blendAB  = uBloomC[i].z;
       float openness = uBloomC[i].w;
+      // Per-bloom modulators (snapshotted from mood on click — see bloomField.js).
+      float outward  = uBloomD[i].x;
+      float curlW    = uBloomD[i].y;
+      float freq     = uBloomD[i].z;
+      float detail   = uBloomD[i].w;
+      float shell    = uBloomB[i].w;
 
       vec3  r = p - c;
       float d = length(r);
@@ -264,10 +325,12 @@ export const PAINT_GLSL = /* glsl */ `
       float t   = d / radius;                 // 0 center .. 1 edge
       float w   = (1.0 - t) * (1.0 - t);       // smooth spatial falloff
 
-      // Shape = dominant archetype + one blend partner (top-2, chosen on CPU).
+      // Shape = dominant archetype + one blend partner (top-2, chosen on CPU). Sample the
+      // archetypes at the ANIMATED (swirling/evolving) coordinate so the shape is alive.
+      vec3  rs = paintWarp(r, seed);
       float presA, presB, steerA, steerB;
-      vec3  dA = archetypeDir(archA, r, t, openness, seed,        presA, steerA);
-      vec3  dB = archetypeDir(archB, r, t, openness, seed + 17.0, presB, steerB);
+      vec3  dA = archetypeDir(archA, rs, t, openness, seed,        freq, detail, presA, steerA);
+      vec3  dB = archetypeDir(archB, rs, t, openness, seed + 17.0, freq, detail, presB, steerB);
       float pres  = mix(presA,  presB,  blendAB);
       float steer = mix(steerA, steerB, blendAB);
       // Direction is weighted by STEER so the redirect survives where density is
@@ -277,17 +340,28 @@ export const PAINT_GLSL = /* glsl */ `
       fdir = fl > 1e-5 ? fdir / fl : dir;
 
       // SHAPE: persistent same-speed redirect, weighted by steer (broad).
-      float sw = w * shapeW * uPaintCurl * steer;
+      float sw = w * shapeW * curlW * steer;
       accum += fdir * sw;
       wSum  += sw;
 
       // BURST: outward pop masked by PRESENCE (thin → spiky, not a sphere; small
-      // floor so a click always registers) + a broad shaped push along the field.
+      // floor so a click always registers) + a broad shaped push along the field. The
+      // shaped term is boosted (PAINT_BURST_SHAPED) and widened toward the rim
+      // (PAINT_BURST_WIDEN) so the pop folds along the shape instead of shoving out.
       float shellP  = 4.0 * t * (1.0 - t);
-      float outP    = mix(w, shellP, uPaintShell);
+      float outP    = mix(w, shellP, shell);
       float popMask = 0.1 + 0.9 * pres;
-      burst += (dir * (outP * uPaintOutward * popMask)
-              + fdir * (w * uPaintCurl * steer)) * burstMag;
+      float wShaped = pow(w, PAINT_BURST_WIDEN);
+      burst += (dir * (outP * outward * popMask)
+              + fdir * (wShaped * curlW * steer * PAINT_BURST_SHAPED)) * burstMag;
+
+      // POST-SURGE CREEP (trails only, uPaintDrift): keep ribbons moving after the firework
+      // dies — but ALONG THE ARCHETYPE (fdir), not pure radial. Pure radial (old) made every
+      // bloom grow straight spikes after the deform, wiping the archetype. Small radial floor
+      // keeps the core from freezing. Self-limiting via w/outP + shapeW LRU fade.
+      // uPaintDrift is 0 for meshes (no creep there).
+      creep += (fdir * (w * curlW * steer) * PAINT_DRIFT_SHAPED
+              + dir  * (outP * outward * popMask) * PAINT_DRIFT_RADIAL) * shapeW;
     }
 
     // Redirect base velocity toward the shape direction at the SAME speed, so the
@@ -297,6 +371,101 @@ export const PAINT_GLSL = /* glsl */ `
       redirect = normalize(accum) * baseSpeed;
     }
     vec3 shaped = mix(baseVel, redirect, clamp(wSum, 0.0, 1.0));
-    return shaped + burst;
+    // Scale the ENTIRE paint deviation (redirect + burst + creep) so different sims (mesh
+    // vs trails) can feel the same blooms by different amounts. 1 = full, 0 = clean flow.
+    return mix(baseVel, shaped + burst + creep * uPaintDrift, uPaintStrength);
+  }
+
+  // Full shaped BURST impulse at a world position — the SAME term paintApply adds,
+  // but with NO base flow. Used by the trail "burst pass" (gpuTrails.js) which runs
+  // this ONCE PER TRAIL (at the head) into a small per-trail texture; the record pass
+  // then applies that vector to the whole ribbon. So the heavy archetype fields are
+  // evaluated ~count times/frame, not count×history. 0 when no bloom is active.
+  vec3 paintBurst(vec3 p) {
+    vec3 burst = vec3(0.0);
+    for (int i = 0; i < MAX_BLOOMS; i++) {
+      if (i >= uBloomCount) break;
+      vec3  c        = uBloomA[i].xyz;
+      float radius   = uBloomA[i].w;
+      float burstMag = uBloomB[i].x;
+      float seed     = uBloomB[i].y;
+      int   archA    = int(uBloomC[i].x + 0.5);
+      int   archB    = int(uBloomC[i].y + 0.5);
+      float blendAB  = uBloomC[i].z;
+      float openness = uBloomC[i].w;
+      float outward  = uBloomD[i].x;
+      float curlW    = uBloomD[i].y;
+      float freq     = uBloomD[i].z;
+      float detail   = uBloomD[i].w;
+      float shell    = uBloomB[i].w;
+
+      vec3  r = p - c;
+      float d = length(r);
+      if (d > radius || d < 1e-5) continue;
+      vec3  dir = r / d;
+      float t   = d / radius;
+      float w   = (1.0 - t) * (1.0 - t);
+
+      vec3  rs = paintWarp(r, seed);
+      float presA, presB, steerA, steerB;
+      vec3  dA = archetypeDir(archA, rs, t, openness, seed,        freq, detail, presA, steerA);
+      vec3  dB = archetypeDir(archB, rs, t, openness, seed + 17.0, freq, detail, presB, steerB);
+      float pres  = mix(presA,  presB,  blendAB);
+      float steer = mix(steerA, steerB, blendAB);
+      vec3  fdir  = mix(dA * steerA, dB * steerB, blendAB);
+      float fl    = length(fdir);
+      fdir = fl > 1e-5 ? fdir / fl : dir;
+
+      float shellP  = 4.0 * t * (1.0 - t);
+      float outP    = mix(w, shellP, shell);
+      float popMask = 0.1 + 0.9 * pres;
+      float wShaped = pow(w, PAINT_BURST_WIDEN);
+      burst += (dir * (outP * outward * popMask)
+              + fdir * (wShaped * curlW * steer * PAINT_BURST_SHAPED)) * burstMag;
+    }
+    return burst;
+  }
+`;
+
+// Draw-pass ink only (meshes, flow dots, ribbons). Does not include the heavy
+// paintApply field — those shaders already get motion from the sim.
+export const PAINT_COLOR_GLSL = /* glsl */ `
+#ifndef MAX_BLOOMS
+#define MAX_BLOOMS ${BLOOM_MAX_ACTIVE}
+#endif
+  uniform int  uBloomCount;
+  uniform vec4 uBloomA[MAX_BLOOMS];
+  uniform vec4 uBloomE[MAX_BLOOMS];   // xyz = paint HSL, w = colour stain radius
+  uniform float uPaintColorAmt;       // 0 = off, 1 = full tint at ink core
+
+  // Soft ink weight at p from permanent colour stains (wider radius, soft edge bleed).
+  // Returns best (hsl, weight); weight is independent of shape fade.
+  vec4 paintColorAt(vec3 p) {
+    float bestW = 0.0;
+    vec3  bestHsl = vec3(0.0);
+    for (int bi = 0; bi < MAX_BLOOMS; bi++) {
+      if (bi >= uBloomCount) break;
+      vec3  c      = uBloomA[bi].xyz;
+      float radius = uBloomE[bi].w;
+      if (radius < 1e-4) continue;
+      float d = length(p - c);
+      if (d >= radius) continue;
+      float t = d / radius;
+      // Soft ink: slow edge falloff (more bleed than hard (1-t)² shape mask).
+      float w = 1.0 - smoothstep(0.15, 1.0, t);
+      w = w * w * (3.0 - 2.0 * w);
+      if (w > bestW) {
+        bestW = w;
+        bestHsl = uBloomE[bi].xyz;
+      }
+    }
+    return vec4(bestHsl, bestW);
+  }
+
+  vec3 applyPaintInk(vec3 hsl, vec3 p) {
+    if (uPaintColorAmt <= 0.0 || uBloomCount <= 0) return hsl;
+    vec4 ink = paintColorAt(p);
+    float tw = ink.w * uPaintColorAmt;
+    return vec3(mix(hsl.x, ink.x, tw), mix(hsl.y, ink.y, tw), mix(hsl.z, ink.z, tw));
   }
 `;

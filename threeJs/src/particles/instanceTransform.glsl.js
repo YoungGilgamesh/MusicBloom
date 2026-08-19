@@ -20,6 +20,48 @@
  *     uniform float uVolHalf;
  */
 export const INSTANCE_GLSL = /* glsl */ `
+  // ── Living-field domain warp (slow global evolution) ───────────────────────
+  // Declared here so BOTH includers (sim advection + mesh render orientation) share one
+  // living field. The including material must supply these uniform objects (0 = frozen).
+  uniform float uFieldWarpAmt;    // world-unit displacement of the sample coordinate
+  uniform float uFieldWarpFreq;   // spatial scale of the warp noise (low = big smooth swells)
+  uniform float uFieldWarpRate;   // temporal drift speed (time = extra noise dimension)
+  uniform float uFieldWarpTime;   // elapsed seconds (written each frame)
+
+  // Cheap value noise (uniquely named — paintField.glsl.js also defines pkNoise/curlNoise
+  // and BOTH are included in the sim shader, so these must NOT collide).
+  float iwHash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float iwNoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(iwHash(i + vec3(0,0,0)), iwHash(i + vec3(1,0,0)), f.x),
+                   mix(iwHash(i + vec3(0,1,0)), iwHash(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(iwHash(i + vec3(0,0,1)), iwHash(i + vec3(1,0,1)), f.x),
+                   mix(iwHash(i + vec3(0,1,1)), iwHash(i + vec3(1,1,1)), f.x), f.y), f.z);
+  }
+  // A slowly-drifting, low-frequency vector displacement seeded by WORLD position (so the
+  // warp is globally coherent + non-repeating, not per-tile). Time drifts the noise domain →
+  // the field morphs continuously. 0 amplitude → returns 0 (exact old behaviour).
+  vec3 iwFieldWarp(vec3 world) {
+    if (uFieldWarpAmt <= 0.0) return vec3(0.0);
+    vec3 q  = world * uFieldWarpFreq;
+    float t = uFieldWarpTime * uFieldWarpRate;
+    vec3 w = vec3(
+      iwNoise(q + vec3(  0.0,  0.0,  0.0) + t),
+      iwNoise(q + vec3( 17.3,  5.1,  9.2) + t * 1.13),
+      iwNoise(q + vec3( -8.2, 23.7,  4.9) + t * 0.87)
+    ) * 2.0 - 1.0;
+    return w * uFieldWarpAmt;
+  }
+
+  // Per-particle float hash (sin-based). GPU-only (orientation roll/ref in the
+  // render shader); NOT used for the cell transforms, so its cross-precision
+  // drift doesn't matter and it needs no CPU counterpart.
   vec3 instHash33(vec3 p) {
     p = vec3(dot(p, vec3(127.1, 311.7,  74.7)),
              dot(p, vec3(269.5, 183.3, 246.1)),
@@ -27,9 +69,35 @@ export const INSTANCE_GLSL = /* glsl */ `
     return fract(sin(p) * 43758.5453123);
   }
 
+  // ── Per-cell integer hash (lowbias32) — CPU/GPU bit-identical ──────────────
+  // The cell transforms (rot/mirror/scale/origin) MUST match between the GPU sim
+  // and CPU readers (frameCloud.js), or trails land on differently-placed tiles.
+  // sin() isn't reproducible across GPU/CPU, so cell randomness uses this
+  // integer hash instead (identical via Math.imul/>>> in JS). One salt per purpose.
+  // Requires highp int/uint precision in the including shader.
+  uint instU(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+  }
+  float instU2F(uint h) { return float(h >> 8u) * (1.0 / 16777216.0); }  // [0,1)
+  vec3 instCellRand(vec3 c, uint salt) {
+    ivec3 ic = ivec3(floor(c + 0.5));
+    uint h = salt * 0x9e3779b9u;
+    h = instU(h ^ uint(ic.x));
+    h = instU(h ^ uint(ic.y));
+    h = instU(h ^ uint(ic.z));
+    uint h1 = instU(h);
+    uint h2 = instU(h1);
+    return vec3(instU2F(h), instU2F(h1), instU2F(h2));
+  }
+
   mat3 instRot(vec3 c) {
-    vec3  axis = normalize(instHash33(c + 3.17) * 2.0 - 1.0 + vec3(1e-4));
-    float ang  = instHash33(c + 7.51).x * 6.2831853;
+    vec3  axis = normalize(instCellRand(c, 1u) * 2.0 - 1.0 + vec3(1e-4));
+    float ang  = instCellRand(c, 2u).x * 6.2831853;
     float s = sin(ang), co = cos(ang), t = 1.0 - co;
     float x = axis.x, y = axis.y, z = axis.z;
     return mat3(
@@ -39,10 +107,10 @@ export const INSTANCE_GLSL = /* glsl */ `
     );
   }
 
-  vec3  instMirror(vec3 c) { return step(0.5, instHash33(c + 13.7)) * 2.0 - 1.0; }  // ±1 per axis
-  float instScale (vec3 c) { return mix(uScaleMin, uScaleMax, instHash33(c + 21.3).y); }
+  vec3  instMirror(vec3 c) { return step(0.5, instCellRand(c, 3u)) * 2.0 - 1.0; }  // ±1 per axis
+  float instScale (vec3 c) { return mix(uScaleMin, uScaleMax, instCellRand(c, 4u).y); }
   vec3  instOrigin(vec3 c) {
-    vec3 j = (instHash33(c + 31.9) * 2.0 - 1.0) * uInstJitter * uInstPeriod;
+    vec3 j = (instCellRand(c, 5u) * 2.0 - 1.0) * uInstJitter * uInstPeriod;
     return c * uInstPeriod + j;
   }
 
@@ -60,7 +128,11 @@ export const INSTANCE_GLSL = /* glsl */ `
   // Local field velocity sampled from the baked volume, rotated into world space.
   // (Scale is dropped: we only care about flow direction/relative magnitude.)
   vec3 instSampleVel(vec3 world, vec3 c) {
-    vec3 loc = instToLocal(world, c);
+    // Living field: nudge the WORLD point by a slow animated warp BEFORE folding it into the
+    // tile's local frame, so the streamlines morph continuously (the whole cloud breathes)
+    // instead of being a frozen baked portrait. Amt = 0 → warped == world (old behaviour).
+    vec3 wp  = world + iwFieldWarp(world);
+    vec3 loc = instToLocal(wp, c);
     vec3 uvw = (loc + uVolHalf) / (2.0 * uVolHalf);
     vec3 vloc = texture(uVelVolume, uvw).xyz;
     return instRot(c) * (instMirror(c) * vloc);

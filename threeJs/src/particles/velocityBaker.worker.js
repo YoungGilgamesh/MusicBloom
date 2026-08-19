@@ -14,13 +14,20 @@
 import { buildFieldBundle, combinedVelocity } from './fields/combine.js';
 
 self.onmessage = (e) => {
-  const { jobId, energy, brightness, texture, heaviness, dynamism, bpm, warpOrder, res, half } = e.data;
+  const { jobId, energy, brightness, texture, heaviness, dynamism, bpm, warpOrder, dominance, res, half, freqMul } = e.data;
 
-  const F    = buildFieldBundle(energy, brightness, texture, heaviness, dynamism, bpm, warpOrder);
-  const N    = res;
+  const F = buildFieldBundle(energy, brightness, texture, heaviness, dynamism, bpm, warpOrder, dominance);
+  const N = res;
   const size = 2 * half;
   const cell = size / N;
   const data = new Float32Array(N * N * N * 4);
+  // freqMul > 1 samples the SAME field bundle at zoomed-in coordinates — more
+  // full noise cycles fit inside [-half,+half], so the baked flow reads as
+  // finer/swirlier detail without changing anything about the field itself
+  // (used by the cover page, whose visible cloud radius is much smaller than
+  // gameplay's — see COVER_FIELD_FREQ_MUL's comment in config.js). Defaults
+  // to 1 (no change) for the real gameplay bake.
+  const fm = freqMul || 1;
 
   let maxMag = 1e-6;
   for (let zi = 0; zi < N; zi++) {
@@ -30,13 +37,13 @@ self.onmessage = (e) => {
       const rowBase = ((zi * N) + yi) * N;
       for (let xi = 0; xi < N; xi++) {
         const x = -half + (xi + 0.5) * cell;
-        const v = combinedVelocity(x, y, z, F);
+        const v = combinedVelocity(x * fm, y * fm, z * fm, F);
         const o = (rowBase + xi) * 4;
-        data[o]   = v[0];
-        data[o+1] = v[1];
-        data[o+2] = v[2];
-        const m = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-        data[o+3] = m;
+        data[o] = v[0];
+        data[o + 1] = v[1];
+        data[o + 2] = v[2];
+        const m = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        data[o + 3] = m;
         if (m > maxMag) maxMag = m;
       }
     }
@@ -46,10 +53,10 @@ self.onmessage = (e) => {
   // relative-speed variation across the field is preserved.
   const inv = 1 / maxMag;
   for (let i = 0; i < data.length; i += 4) {
-    data[i]   *= inv;
-    data[i+1] *= inv;
-    data[i+2] *= inv;
-    data[i+3] *= inv;
+    data[i] *= inv;
+    data[i + 1] *= inv;
+    data[i + 2] *= inv;
+    data[i + 3] *= inv;
   }
 
   self.postMessage({ jobId, data, res, half }, [data.buffer]);

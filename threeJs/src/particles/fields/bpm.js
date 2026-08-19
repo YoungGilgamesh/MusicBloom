@@ -10,7 +10,7 @@
  */
 
 import { SHAPE_SCALE } from '../../config.js';
-import { seededRng } from './shared.js';
+import { seededRng, vn3grad } from './shared.js';
 
 export function normBpm(bpm) { return Math.min(1, Math.max(0, (bpm - 40) / 160)); }
 
@@ -54,4 +54,19 @@ export function interferenceAndGrad(x, y, z, src, k) {
   }
   const N = src.length;
   return { f: f / N, gx: gx / N, gy: gy / N, gz: gz / N };
+}
+
+// BPM flow — curl-noise: v = ∇f × ∇n.  ∇f points across the interference fringes,
+// so crossing it with a decorrelated noise gradient gives a flow that runs *along*
+// the constructive-interference surfaces (where bpm seeds sit) rather than across
+// them — the standing-wave bubbles keep their shape, fully 3-D, no planar axis.
+export function curlBpm(x, y, z, src, k) {
+  const { gx, gy, gz } = interferenceAndGrad(x, y, z, src, k);
+  const nf = 1.2;   // secondary meander over a few lattice cells across the shape
+  const [nx, ny, nz] = vn3grad(x * nf, y * nf, z * nf, 613);
+  return [
+    gy * nz - gz * ny,
+    gz * nx - gx * nz,
+    gx * ny - gy * nx,
+  ];
 }

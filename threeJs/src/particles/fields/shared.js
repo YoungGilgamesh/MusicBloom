@@ -41,6 +41,16 @@ export function vn3(x, y, z, seed) {
     w);
 }
 
+// ∇vn3 via central differences (in the noise's own lattice space — callers pass
+// already-scaled coords).  Used as the "secondary" gradient in curl-noise flows
+// (texture / bpm): v = ∇structure × ∇noise flows along the structure's isosurface.
+export function vn3grad(x, y, z, seed, eps = 0.35) {
+  const gx = (vn3(x+eps, y, z, seed) - vn3(x-eps, y, z, seed)) / (2*eps);
+  const gy = (vn3(x, y+eps, z, seed) - vn3(x, y-eps, z, seed)) / (2*eps);
+  const gz = (vn3(x, y, z+eps, seed) - vn3(x, y, z-eps, seed)) / (2*eps);
+  return [gx, gy, gz];
+}
+
 // Maximum coordinate displacement per warp step (world units, per active param).
 // With Option-A only 1–2 fields warp (vs the old 6), so we can afford a larger
 // per-warp displacement without compounding into chaos.

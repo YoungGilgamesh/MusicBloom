@@ -19,22 +19,23 @@ import {
   BAND_SUB_BASS, BAND_BASS, BAND_LOW_MID, BAND_MID,
   BAND_HIGH_MID, BAND_PRESENCE, BAND_BRILLIANCE,
   BEAT_FLUX_THRESHOLD, BEAT_MIN_FLUX, BEAT_COOLDOWN_MS, BEAT_PEAK_WINDOW,
+  MOOD_WINDOW_SEC,
 } from '../config.js';
-import { computeMoodFingerprint } from './audioMoodAnalyze.js';
+import { computeMoodFingerprint, computeWindowedMood } from './audioMoodAnalyze.js';
 
 // ── Analysis constants ────────────────────────────────────────────────────────
 
 const FFT_SIZE = 2048;   // window size → 23.4 Hz/bin at 48 kHz
 const HOP_SIZE = 512;    // hop → ~93.75 frames/sec at 48 kHz
-const HALF     = FFT_SIZE >>> 1;
+const HALF = FFT_SIZE >>> 1;
 
 // dB range for visual band mapping (same philosophy as the website's linear-to-display conversion)
-const DB_MIN   = -90;    // floor (silence)
-const DB_MAX   = -20;    // ceiling (loud music)
+const DB_MIN = -90;    // floor (silence)
+const DB_MAX = -20;    // ceiling (loud music)
 const DB_RANGE = DB_MAX - DB_MIN;
 
 // Temporal smoothing — mirrors Web Audio API AnalyserNode.smoothingTimeConstant = 0.8
-const SMOOTH   = 0.8;
+const SMOOTH = 0.8;
 
 // ── Pre-computed tables ───────────────────────────────────────────────────────
 
@@ -80,8 +81,8 @@ function fft(re, im) {
         const p = k + j, q = p + half;
         const vR = re[q] * tR - im[q] * tI;
         const vI = re[q] * tI + im[q] * tR;
-        re[q] = re[p] - vR;  im[q] = im[p] - vI;
-        re[p] += vR;         im[p] += vI;
+        re[q] = re[p] - vR; im[q] = im[p] - vI;
+        re[p] += vR; im[p] += vI;
       }
     }
   }
@@ -92,8 +93,8 @@ function fft(re, im) {
 // Low-mid warmth (< 500 Hz) → 1.5×.
 // High-frequency air (> 8000 Hz) → 0.7× de-emphasised.
 function percWeight(hz) {
-  if (hz < 200)  return 2.0;
-  if (hz < 500)  return 1.5;
+  if (hz < 200) return 2.0;
+  if (hz < 500) return 1.5;
   if (hz > 8000) return 0.7;
   return 1.0;
 }
@@ -105,13 +106,13 @@ function percWeight(hz) {
  * Used for smooth visual/particle-driving band values.
  */
 function bandAvgDB(dbMags, loHz, hiHz, binHz) {
-  const s = Math.max(0,        Math.round(loHz / binHz));
+  const s = Math.max(0, Math.round(loHz / binHz));
   const e = Math.min(HALF - 1, Math.round(hiHz / binHz));
   if (s > e) return 0;
   let sum = 0, wTotal = 0;
   for (let i = s; i <= e; i++) {
     const w = percWeight(i * binHz);
-    sum    += dbMags[i] * w;
+    sum += dbMags[i] * w;
     wTotal += w;
   }
   return wTotal > 0 ? sum / wTotal : 0;
@@ -123,7 +124,7 @@ function bandAvgDB(dbMags, loHz, hiHz, binHz) {
  * Perceptual weighting applied so kick drums spike strongly.
  */
 function bandFluxLinear(linMags, prevLinMags, loHz, hiHz, binHz) {
-  const s = Math.max(0,        Math.round(loHz / binHz));
+  const s = Math.max(0, Math.round(loHz / binHz));
   const e = Math.min(HALF - 1, Math.round(hiHz / binHz));
   if (s > e) return 0;
   let sum = 0;
@@ -136,11 +137,12 @@ function bandFluxLinear(linMags, prevLinMags, loHz, hiHz, binHz) {
 
 // ── Offline analysis ──────────────────────────────────────────────────────────
 
-function analyseBuffer(audioBuffer) {
-  const len        = audioBuffer.length;
-  const nCh        = audioBuffer.numberOfChannels;
+/** Offline buffer analysis (exported for tooling / batch mood scans). */
+export function analyseBuffer(audioBuffer) {
+  const len = audioBuffer.length;
+  const nCh = audioBuffer.numberOfChannels;
   const sampleRate = audioBuffer.sampleRate;
-  const binHz      = sampleRate / FFT_SIZE;
+  const binHz = sampleRate / FFT_SIZE;
 
   // Mix to mono (same as website — treats stereo symmetrically).
   const mono = new Float32Array(len);
@@ -150,31 +152,31 @@ function analyseBuffer(audioBuffer) {
   }
 
   const numFrames = Math.max(1, Math.floor((len - FFT_SIZE) / HOP_SIZE) + 1);
-  const fps       = sampleRate / HOP_SIZE;
+  const fps = sampleRate / HOP_SIZE;
 
   // Output arrays — one entry per analysis frame for all 7 bands + flux.
-  const subBassArr    = new Float32Array(numFrames);
-  const bassArr       = new Float32Array(numFrames);
-  const lowMidArr     = new Float32Array(numFrames);
-  const midArr        = new Float32Array(numFrames);
-  const highMidArr    = new Float32Array(numFrames);
-  const presenceArr   = new Float32Array(numFrames);
+  const subBassArr = new Float32Array(numFrames);
+  const bassArr = new Float32Array(numFrames);
+  const lowMidArr = new Float32Array(numFrames);
+  const midArr = new Float32Array(numFrames);
+  const highMidArr = new Float32Array(numFrames);
+  const presenceArr = new Float32Array(numFrames);
   const brillianceArr = new Float32Array(numFrames);
-  const bassFluxArr   = new Float32Array(numFrames);
+  const bassFluxArr = new Float32Array(numFrames);
   // Mood feature arrays (computed in the same loop, nearly free).
-  const centroidArr   = new Float32Array(numFrames); // spectral centroid (Hz)
-  const spreadArr     = new Float32Array(numFrames); // spectral spread   (Hz)
-  const rmsArr        = new Float32Array(numFrames); // windowed RMS amplitude
-  const zcrArr        = new Float32Array(numFrames); // zero-crossing rate [0-1]
-  const fullFluxArr   = new Float32Array(numFrames); // full-spectrum flux
+  const centroidArr = new Float32Array(numFrames); // spectral centroid (Hz)
+  const spreadArr = new Float32Array(numFrames); // spectral spread   (Hz)
+  const rmsArr = new Float32Array(numFrames); // windowed RMS amplitude
+  const zcrArr = new Float32Array(numFrames); // zero-crossing rate [0-1]
+  const fullFluxArr = new Float32Array(numFrames); // full-spectrum flux
 
   // Working buffers.
-  const re           = new Float32Array(FFT_SIZE);
-  const im           = new Float32Array(FFT_SIZE);
-  const linMags      = new Float32Array(HALF);   // current raw linear magnitudes
-  const prevLinMags  = new Float32Array(HALF);   // previous frame (for flux)
-  const dbMags       = new Float32Array(HALF);   // temporally-smoothed dB magnitudes
-  const prevDbMags   = new Float32Array(HALF);   // previous frame (for smoothing)
+  const re = new Float32Array(FFT_SIZE);
+  const im = new Float32Array(FFT_SIZE);
+  const linMags = new Float32Array(HALF);   // current raw linear magnitudes
+  const prevLinMags = new Float32Array(HALF);   // previous frame (for flux)
+  const dbMags = new Float32Array(HALF);   // temporally-smoothed dB magnitudes
+  const prevDbMags = new Float32Array(HALF);   // previous frame (for smoothing)
 
   for (let frame = 0; frame < numFrames; frame++) {
     // --- Apply Hann window and run FFT (same as website) ---
@@ -208,7 +210,7 @@ function analyseBuffer(audioBuffer) {
       let centHz = 0, totalMag = 0, fullFlux = 0;
       for (let i = 1; i < HALF; i++) {
         const hz = i * binHz;
-        centHz   += linMags[i] * hz;
+        centHz += linMags[i] * hz;
         totalMag += linMags[i];
         const diff = linMags[i] - prevLinMags[i];
         if (diff > 0) fullFlux += diff;
@@ -221,24 +223,24 @@ function analyseBuffer(audioBuffer) {
         const d = i * binHz - centHz;
         spread += linMags[i] * d * d;
       }
-      spreadArr[frame]  = totalMag > 0 ? Math.sqrt(spread / totalMag) : 0;
+      spreadArr[frame] = totalMag > 0 ? Math.sqrt(spread / totalMag) : 0;
       fullFluxArr[frame] = fullFlux / HALF;
     }
 
     // --- dB-scaled magnitudes with temporal smoothing (for visual bands) ---
     for (let i = 0; i < HALF; i++) {
-      const db     = linMags[i] > 0 ? 20 * Math.log10(linMags[i]) : DB_MIN;
+      const db = linMags[i] > 0 ? 20 * Math.log10(linMags[i]) : DB_MIN;
       const scaled = Math.max(0, Math.min(1, (db - DB_MIN) / DB_RANGE));
-      dbMags[i]    = SMOOTH * prevDbMags[i] + (1 - SMOOTH) * scaled;
+      dbMags[i] = SMOOTH * prevDbMags[i] + (1 - SMOOTH) * scaled;
     }
 
     // --- 7 standard bands (dB-scaled, smooth) — drive visual particle effects ---
-    subBassArr[frame]    = bandAvgDB(dbMags, ...BAND_SUB_BASS,   binHz);
-    bassArr[frame]       = bandAvgDB(dbMags, ...BAND_BASS,       binHz);
-    lowMidArr[frame]     = bandAvgDB(dbMags, ...BAND_LOW_MID,    binHz);
-    midArr[frame]        = bandAvgDB(dbMags, ...BAND_MID,        binHz);
-    highMidArr[frame]    = bandAvgDB(dbMags, ...BAND_HIGH_MID,   binHz);
-    presenceArr[frame]   = bandAvgDB(dbMags, ...BAND_PRESENCE,   binHz);
+    subBassArr[frame] = bandAvgDB(dbMags, ...BAND_SUB_BASS, binHz);
+    bassArr[frame] = bandAvgDB(dbMags, ...BAND_BASS, binHz);
+    lowMidArr[frame] = bandAvgDB(dbMags, ...BAND_LOW_MID, binHz);
+    midArr[frame] = bandAvgDB(dbMags, ...BAND_MID, binHz);
+    highMidArr[frame] = bandAvgDB(dbMags, ...BAND_HIGH_MID, binHz);
+    presenceArr[frame] = bandAvgDB(dbMags, ...BAND_PRESENCE, binHz);
     brillianceArr[frame] = bandAvgDB(dbMags, ...BAND_BRILLIANCE, binHz);
 
     // --- Bass spectral flux on RAW linear mags — sharp beat trigger ---
@@ -252,12 +254,12 @@ function analyseBuffer(audioBuffer) {
   // ── Beat detection: local peak-pick on bass spectral flux ─────────────────
   // Global mean flux sets a relative threshold → handles both sparse intro
   // and dense drop without parameter changes.
-  const meanFlux   = bassFluxArr.reduce((a, b) => a + b, 0) / numFrames;
+  const meanFlux = bassFluxArr.reduce((a, b) => a + b, 0) / numFrames;
   const fluxThresh = meanFlux * BEAT_FLUX_THRESHOLD;
-  const cooldownF  = Math.ceil((BEAT_COOLDOWN_MS / 1000) * fps);
-  const WIN        = BEAT_PEAK_WINDOW;
+  const cooldownF = Math.ceil((BEAT_COOLDOWN_MS / 1000) * fps);
+  const WIN = BEAT_PEAK_WINDOW;
 
-  const beatTimes   = [];
+  const beatTimes = [];
   let lastBeatFrame = -cooldownF;
 
   for (let f = WIN; f < numFrames - WIN; f++) {
@@ -275,14 +277,6 @@ function analyseBuffer(audioBuffer) {
     lastBeatFrame = f;
   }
 
-  console.log(
-    `[audio] ${numFrames} frames @ ${fps.toFixed(1)} fps`
-    + ` | flux mean=${meanFlux.toFixed(6)}  thresh=${fluxThresh.toFixed(6)}`
-    + ` | ${beatTimes.length} beats detected`
-  );
-  if (beatTimes.length > 0)
-    console.log(`[audio] beat timestamps (s): ${beatTimes.slice(0, 12).map(t => t.toFixed(3)).join('  ')}`);
-
   return {
     subBassArr, bassArr, lowMidArr, midArr,
     highMidArr, presenceArr, brillianceArr,
@@ -298,6 +292,7 @@ function analyseBuffer(audioBuffer) {
 
 /**
  * Load, decode and fully pre-analyse `src` offline.
+ * `src` is a URL string (library track) or an ArrayBuffer (user upload).
  * Returns { getAudioData(), context }.
  *
  * getAudioData() → {
@@ -307,12 +302,16 @@ function analyseBuffer(audioBuffer) {
  * }
  */
 export async function createPrecomputedAnalyser(src) {
-  console.log('[audio] pre-computing…');
-  const t0 = performance.now();
-
-  const res         = await fetch(src);
-  const arrayBuffer = await res.arrayBuffer();
-  const ctx         = new AudioContext();
+  // ArrayBuffer = user upload (already in memory). String = library URL.
+  // slice() so decodeAudioData can't detach the caller's copy.
+  let arrayBuffer;
+  if (src instanceof ArrayBuffer) {
+    arrayBuffer = src.slice(0);
+  } else {
+    const res = await fetch(encodeURI(src));
+    arrayBuffer = await res.arrayBuffer();
+  }
+  const ctx = new AudioContext();
   const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
   const analysed = analyseBuffer(audioBuffer);
@@ -324,28 +323,61 @@ export async function createPrecomputedAnalyser(src) {
 
   const mood = computeMoodFingerprint(analysed);
 
-  console.log(`[audio] pre-compute done in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
-
-  // Start looping playback.
+  // Start playback — plays through once (see AUDIO_LOOP in config.js if a
+  // looping ambient mode is ever wanted again).
   const source = ctx.createBufferSource();
   source.buffer = audioBuffer;
-  source.loop   = true;
+  source.loop = false;
   source.connect(ctx.destination);
   source.start(0);
   const startCtxTime = ctx.currentTime;
 
   let prevLoopTime = 0;
-  let nextBeatIdx  = 0;
+  let nextBeatIdx = 0;
 
   return {
     get context() { return ctx; },
     mood,
+    duration,
+    /** Offline analysis payload (windowed mood / colour-span scans). */
+    analysed,
+
+    /**
+     * Registers a one-shot callback fired when playback reaches the end of
+     * the buffer (native AudioBufferSourceNode 'ended' event — fires once,
+     * reliably, regardless of how `getTime()` is read elsewhere). Used to
+     * kick off the end-of-track fade-out back to the cover page.
+     */
+    onEnded(cb) {
+      source.onended = cb;
+    },
+
+    /** Current loop-relative playhead time in seconds. */
+    getTime() {
+      // Clamped, not modulo — the source no longer loops (AUDIO_LOOP off), so
+      // once the track ends ctx.currentTime keeps climbing forever; without
+      // the clamp this would wrap back to 0 via `% duration` and silently
+      // fake-loop the mood/analysis-driven visuals even though the sound
+      // itself has actually stopped.
+      return Math.min(ctx.currentTime - startCtxTime, duration);
+    },
+
+    /**
+     * Live "mood of the moment" (Step 4): a fingerprint from the last
+     * `windowSec` of audio ending at the current playhead. Blooms read this so
+     * they react to quiet vs. intense sections. CPU-only, cheap to call.
+     */
+    getWindowedMood(windowSec = MOOD_WINDOW_SEC) {
+      const loopTime = Math.min(ctx.currentTime - startCtxTime, duration);
+      return computeWindowedMood(analysed, loopTime, windowSec, mood.bpm);
+    },
 
     getAudioData() {
-      const rawTime  = ctx.currentTime - startCtxTime;
-      const loopTime = rawTime % duration;
+      const rawTime = ctx.currentTime - startCtxTime;
+      const loopTime = Math.min(rawTime, duration);
 
-      // Reset beat cursor on loop wrap-around.
+      // Reset beat cursor on loop wrap-around (kept for safety — no-op now
+      // that playback doesn't loop, since loopTime never decreases anymore).
       if (loopTime < prevLoopTime) nextBeatIdx = 0;
       prevLoopTime = loopTime;
 
@@ -359,17 +391,17 @@ export async function createPrecomputedAnalyser(src) {
       }
 
       return {
-        subBass:    subBassArr[frame],
-        bass:       bassArr[frame],
-        lowMid:     lowMidArr[frame],
-        mid:        midArr[frame],
-        highMid:    highMidArr[frame],
-        presence:   presenceArr[frame],
+        subBass: subBassArr[frame],
+        bass: bassArr[frame],
+        lowMid: lowMidArr[frame],
+        mid: midArr[frame],
+        highMid: highMidArr[frame],
+        presence: presenceArr[frame],
         brilliance: brillianceArr[frame],
         // Legacy aliases — shaders / main.js use these names.
-        mids:       midArr[frame],
-        treble:     brillianceArr[frame],
-        volume:     (bassArr[frame] + midArr[frame] + brillianceArr[frame]) / 3,
+        mids: midArr[frame],
+        treble: brillianceArr[frame],
+        volume: (bassArr[frame] + midArr[frame] + brillianceArr[frame]) / 3,
         isBeat,
       };
     },

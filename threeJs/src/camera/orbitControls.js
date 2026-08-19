@@ -18,6 +18,7 @@ import {
     COVER_ORBIT_DAMPING,
     COVER_ORBIT_MAX_PITCH,
 } from '../config.js';
+import { scaledLookSensitivity } from './lookSensitivity.js';
 
 export function createOrbitControls(camera, domElement, onLook) {
     let yaw = Math.random() * Math.PI * 2; // random starting look direction each load
@@ -36,8 +37,9 @@ export function createOrbitControls(camera, domElement, onLook) {
         lastX = e.clientX; lastY = e.clientY;
         if (Math.abs(dx) > 1 || Math.abs(dy) > 1) autoDrift = false;
         if ((Math.abs(dx) > 3 || Math.abs(dy) > 3) && typeof onLook === 'function') onLook();
-        targetYaw -= dx * COVER_ORBIT_SENSITIVITY;
-        targetPitch -= dy * COVER_ORBIT_SENSITIVITY;
+        const look = scaledLookSensitivity(COVER_ORBIT_SENSITIVITY);
+        targetYaw -= dx * look;
+        targetPitch -= dy * look;
         targetPitch = Math.max(-COVER_ORBIT_MAX_PITCH, Math.min(COVER_ORBIT_MAX_PITCH, targetPitch));
     };
 

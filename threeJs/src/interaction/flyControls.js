@@ -11,6 +11,7 @@
 
 import * as THREE from 'three';
 import { FLY_SPEED, FLY_SENSITIVITY, FLY_DAMPING, FLY_MAX_PITCH, COVER_CAMERA_EASE_TIME, coverCameraEaseIn } from '../config.js';
+import { scaledLookSensitivity } from '../camera/lookSensitivity.js';
 
 export function createFlyControls(camera, domElement, onDrag) {
   let yaw = 0, pitch = 0;         // current (damped)
@@ -31,8 +32,9 @@ export function createFlyControls(camera, domElement, onDrag) {
     const dx = e.clientX - lastX, dy = e.clientY - lastY;
     lastX = e.clientX; lastY = e.clientY;
     if ((Math.abs(dx) > 3 || Math.abs(dy) > 3) && typeof onDrag === 'function') onDrag();
-    targetYaw -= dx * FLY_SENSITIVITY;
-    targetPitch -= dy * FLY_SENSITIVITY;
+    const look = scaledLookSensitivity(FLY_SENSITIVITY);
+    targetYaw -= dx * look;
+    targetPitch -= dy * look;
     targetPitch = Math.max(-FLY_MAX_PITCH, Math.min(FLY_MAX_PITCH, targetPitch));
     // A deliberate steer overrides any residual auto-drift spin immediately.
     spinRate = 0;

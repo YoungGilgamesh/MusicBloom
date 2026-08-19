@@ -323,7 +323,7 @@ export const FLY_SPEED_SCALE_MAX = 2.40; // fast-tempo / intense — strong flyt
 // bubble so the far side of the shape still reads. A bit further back than "just outside
 // the core" so the first fly-in shows the form before you reach the front edge.
 export const CAMERA_FRAME_DIST = SHAPE_SCALE * 1.28; // ≈ 3.2 — slightly behind the form, looking in
-export const FLY_SENSITIVITY = 0.0026; // radians of turn per pixel dragged
+export const FLY_SENSITIVITY = 0.0026; // radians of turn per pixel dragged (desktop; boosted on narrow screens)
 export const FLY_DAMPING = 0.08;   // steering smoothing (per-frame lerp toward target)
 export const FLY_MAX_PITCH = 1.35;   // clamp pitch (radians) to avoid gimbal flip
 
@@ -738,7 +738,7 @@ export const MOOD_ORBS_WRAP_FADE_TIME = 1.6;
 // comments). A Start button kicks off the transition into the real experience
 // (see TRANSITION_* below).
 export const COVER_ORBIT_SPEED = 0.03;                // idle auto-drift (rad/sec) when not dragging
-export const COVER_ORBIT_SENSITIVITY = 0.0045;            // drag → yaw/pitch radians per pixel
+export const COVER_ORBIT_SENSITIVITY = 0.0045;            // drag → yaw/pitch radians per pixel (desktop; boosted on narrow screens)
 export const COVER_ORBIT_DAMPING = 0.06;                // steering smoothing (per-frame lerp)
 export const COVER_ORBIT_MAX_PITCH = 1.3;                 // clamp pitch (radians)
 // Cover draws a bit below gameplay resolution (no mesh cloud; sim is throttled).

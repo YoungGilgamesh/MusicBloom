@@ -27,7 +27,7 @@ export const FLOW_DOTS_STRETCH = 1.85;
 // renders smaller and upscales (softer, much faster).
 export const RENDER_PIXEL_RATIO = 0.75;
 // Phones only (`pointer: coarse`). Desktop keeps RENDER_PIXEL_RATIO.
-export const RENDER_PIXEL_RATIO_MOBILE = 1.5;
+export const RENDER_PIXEL_RATIO_MOBILE = 1.2;
 
 // Output grade: ACES filmic (applied in custom shaders via toneMap.glsl.js).
 export const TONE_MAPPING_ACES = true;

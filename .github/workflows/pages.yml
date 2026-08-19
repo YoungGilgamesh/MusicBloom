@@ -30,7 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run build
         env:
-          VITE_BASE: /Web-Art/
+          VITE_BASE: /MusicBloom/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: threeJs/dist

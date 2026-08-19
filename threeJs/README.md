@@ -22,7 +22,7 @@ Host the `dist/` folder.
 
 The live link after the first Actions deploy:
 
-**https://younggilgamesh.github.io/Web-Art/**
+**https://younggilgamesh.github.io/MusicBloom/**
 
 On GitHub: **Settings → Pages → Source: GitHub Actions**. Push to `laptop_test_cursor` or `master` to republish.
 

@@ -1720,7 +1720,6 @@ function startTransition() {
   playButtonSfx();
   appPhase = 'transitioning';
   transitionStart = elapsed;
-  kickGameplayBoot();
   fadeOutCoverUi();
   fadeOutCoverBgm();
   resetTutorials();
@@ -2044,10 +2043,13 @@ function animate() {
       if (particles && !meshAddedToScene) { scene.add(particles); meshAddedToScene = true; }
     }
 
-    // startAudio() itself (decode + synchronous FFT analysis — the actual
-    // source of the freeze) is deliberately held off until the cover fadeout
-    // is fully done, so that freeze lands on a solid black screen.
-    if (!audioRequested && fadeOutT >= 1) {
+    // Gameplay systems (mesh, theme BGs, orbs, dust, haze) boot only once the
+    // cover has fully faded to black — so the Start click itself stays smooth.
+    if (fadeOutT >= 1) kickGameplayBoot();
+
+    // Audio decode/FFT also waits for that black hold, and for the boot to
+    // finish, so both hitches land on a solid black screen.
+    if (!audioRequested && fadeOutT >= 1 && gameplayReady) {
       audioRequested = true;
       startAudio();
     }

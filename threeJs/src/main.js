@@ -172,7 +172,7 @@ scene.background = null;
 const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.1, 100);
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
-renderer.debug.checkShaderErrors = true;
+renderer.debug.checkShaderErrors = false;
 renderer.setClearColor(BG_COLOR, 1);
 // ACES filmic grade — also applied inside custom shaders (uToneExposure); see toneMap.glsl.js.
 if (TONE_MAPPING_ACES) {
@@ -278,6 +278,13 @@ let simTickCounter = 0;
 // hold — see animate()'s fadeOutT>=1 branch — instead of pre-warmed at cover
 // page load, so cover doesn't pay its fill-rate cost the whole time it's up).
 let meshAddedToScene = false;
+let startBtn = null;
+let uploadBtn = null;
+let logoEl = null;
+let logoIconEl = null;
+let adviceEl = null;
+let coverUiPending = false;
+let coverTitleRevealed = false;
 
 // Cover page orbits a fixed focal point; swapped for forward flight on Start
 // (see startTransition()). `controls` is reassigned, so all later references
@@ -383,8 +390,10 @@ function beginCoverSceneFade() {
   fadeInCoverBgm(coverFadeInDuration);
 }
 function maybeStartInitialCoverFadeIn() {
-  if (!initialBakeDone || !initialWarmupDone || coverFadeInStart !== null || coverFadeScheduled) return;
-  startCoverFadeIn(INITIAL_LOAD_FADE_TIME);
+  if (coverFadeArmed) return;
+  if (!initialBakeDone || !initialWarmupDone || !coverTitleRevealed) return;
+  if (coverFadeInStart !== null) return;
+  beginCoverSceneFade();
 }
 function maybeStartLoopBackCoverFadeIn() {
   if (!coverFadeArmed || pendingBakeJobId !== null || coverFadeInStart !== null || coverFadeScheduled) return;
@@ -525,36 +534,25 @@ function restoreTiling(uniforms) {
   uniforms.uScaleMax.value = SIM_INST_SCALE_MAX;
 }
 
-// The mesh cloud stays invisible/out of the scene until Start regardless (see
-// below) — its shape here is irrelevant cosmetically, so a neutral mood is
-// used (no V1 dependency); it's properly reshaped from the REAL track mood by
-// applyBaseShape() once audio actually starts.
-const particles = createQuantumCloud({
-  energy: coverMood.energy, brightness: coverMood.brightness, texture: coverMood.texture,
-  heaviness: coverMood.heaviness, dynamism: coverMood.dynamism, bpm: coverMood.bpm,
-});
-// NOT added to the scene yet — the mesh cloud (shader compile, mesh-mix texture
-// upload, sim render-target allocation) is the single heaviest one-time cost on
-// this page, and paying it during cover just to render it fully invisible
-// (uSpawnFrac=0) wastes fill-rate the whole time the player is looking at the
-// cover page for no visible benefit. Instead it's added once the cover fadeout
-// finishes and the screen is solid black (see animate()'s fadeOutT>=1 branch),
-// so the (larger, but now hidden) hitch lands there instead — same trick
-// already used for startAudio()/applyRealTrackMood() below.
-particles.material.uniforms.uSpawnFrac.value = 0;
-
-// Preload all five mesh-type libraries. Mood mix (1 major + 2 accents) bakes on
-// track mood / when the cache first lands (neutral mood until audio starts).
+// Mesh cloud, its GPGPU sim, theme BGs, dust, orbs, and haze are created on
+// Start (see kickGameplayBoot) so a cold tab does not compile the whole game
+// before the cover can appear. Cover only needs trails, dots, and the volume.
+let particles = null;
+let particleSim = null;
+let u = null;
 let meshTypeCache = null;
 let lastMeshMix = null;
-
-// GPGPU flow simulation — advects particles along the baked mood velocity
-// volume with lifetime + camera-relative respawn.
-const particleSim = new ParticleSim(renderer, particles.count, particles.userData.seedPositions);
-particles.material.uniforms.uSimW.value = particleSim.width;
-particles.material.uniforms.uSimRes.value.set(particleSim.width, particleSim.height);
+let dust = null;
+let moodOrbs = null;
+let starryBg = null;
+let cloudSkyBg = null;
+let lightLeakBg = null;
+let elevHaze = null;
+let gameplayBootStep = -1;
+let gameplayReady = false;
 
 function syncMeshSimUniforms() {
+  if (!particles || !particleSim) return;
   const mu = particles.material.uniforms;
   const su = particleSim.mat.uniforms;
   mu.uSimW.value = particleSim.width;
@@ -563,6 +561,125 @@ function syncMeshSimUniforms() {
   mu.uBloomCount = su.uBloomCount;
   mu.uBloomA = su.uBloomA;
   mu.uBloomE = su.uBloomE;
+}
+
+function setThemeFade(v) {
+  if (starryBg) starryBg.fadeMul = v;
+  if (cloudSkyBg) cloudSkyBg.fadeMul = v;
+  if (lightLeakBg) lightLeakBg.fadeMul = v;
+}
+
+function onMeshTypeCache(cache) {
+  meshTypeCache = cache;
+  if (particles) applyBaseShape({ reframe: false });
+}
+
+function ensureMeshCloud() {
+  if (particles) return;
+  particles = createQuantumCloud({
+    energy: coverMood.energy, brightness: coverMood.brightness, texture: coverMood.texture,
+    heaviness: coverMood.heaviness, dynamism: coverMood.dynamism, bpm: coverMood.bpm,
+  });
+  particles.material.uniforms.uSpawnFrac.value = 0;
+  particleSim = new ParticleSim(renderer, particles.count, particles.userData.seedPositions);
+  u = particles.material.uniforms;
+  syncMeshSimUniforms();
+  u.uVelVolume.value = volTex;
+  particleSim.setVolume(volTex, SIM_VOL_HALF);
+  if (picker?.setParticleSim) picker.setParticleSim(particleSim);
+  if (picker?.setCount) picker.setCount(particles.count);
+  const c = trailColorMotion.current;
+  if (u.uColorHSL) u.uColorHSL.value.set(c.h, c.s, c.l);
+}
+
+function kickGameplayBoot() {
+  if (gameplayReady || gameplayBootStep >= 0) return;
+  gameplayBootStep = 0;
+  if (USE_MODEL && !meshTypeCache) {
+    loadMeshTypeCache(MESH_TYPES).then(onMeshTypeCache)
+      .catch((err) => console.warn('[models] mesh type cache failed — keeping cubes:', err));
+  }
+}
+
+function stepGameplayBoot() {
+  if (gameplayReady || gameplayBootStep < 0) return;
+  try {
+    switch (gameplayBootStep) {
+      case 0:
+        ensureMeshCloud();
+        break;
+      case 1:
+        starryBg = new StarryBackground();
+        scene.add(starryBg.object3D);
+        starryBg.fadeMul = 0;
+        starryBg.setColors(bgColorMotion.top, bgColorMotion.bottom);
+        break;
+      case 2:
+        cloudSkyBg = new CloudSkyBackground();
+        scene.add(cloudSkyBg.object3D);
+        cloudSkyBg.fadeMul = 0;
+        cloudSkyBg.setColors(bgColorMotion.top, bgColorMotion.bottom);
+        break;
+      case 3:
+        lightLeakBg = new LightLeakBackground();
+        scene.add(lightLeakBg.object3D);
+        lightLeakBg.fadeMul = 0;
+        lightLeakBg.setColors(bgColorMotion.top, bgColorMotion.bottom);
+        bakeBgType(baseMood);
+        break;
+      case 4:
+        if (FROZEN_DUST_ENABLED) {
+          dust = new FrozenDust();
+          scene.add(dust.object3D);
+          dust.enabled = false;
+          dust.opacity = 0;
+          dust.setColorHSL(trailColorMotion.current);
+        }
+        if (MOOD_ORBS_ENABLED) {
+          moodOrbs = new MoodOrbs();
+          scene.add(moodOrbs.object3D);
+          moodOrbs.enabled = appPhase !== 'cover';
+          moodOrbs.fadeMul = 0;
+          moodOrbs.setColorHSL(trailColorMotion.current);
+        }
+        if (BG_HAZE_ENABLED) {
+          elevHaze = new ElevationHaze();
+          scene.add(elevHaze.object3D);
+          elevHaze.enabled = appPhase !== 'cover';
+          elevHaze.fadeMul = 0;
+        }
+        break;
+      case 5:
+        if (particleSim) {
+          const pos = camera.position;
+          const su = particleSim.mat.uniforms;
+          if (su.uBloomCount && su.uBloomA?.value?.[0]) {
+            const prev = su.uBloomCount.value;
+            su.uBloomCount.value = 1;
+            su.uBloomA.value[0].set(pos.x, pos.y, pos.z, 1.5);
+            su.uBloomB.value[0].set(1.0, 0.42, 1.0, 0.5);
+            su.uBloomC.value[0].set(0, 1, 0.35, 0.6);
+            su.uBloomD.value[0].set(1.4, 1.0, 2.5, 0.5);
+            particleSim.update(1 / 60, pos);
+            su.uBloomCount.value = prev;
+          }
+        }
+        renderer.compile(scene, camera);
+        gameplayReady = true;
+        gameplayBootStep = -1;
+        return;
+      default:
+        gameplayReady = true;
+        gameplayBootStep = -1;
+        return;
+    }
+  } catch (err) {
+    console.warn('[boot] gameplay slice failed:', err);
+    gameplayReady = true;
+    gameplayBootStep = -1;
+    return;
+  }
+  gameplayBootStep++;
 }
 
 // ── Baked mood velocity volume ────────────────────────────────────────────────
@@ -579,8 +696,8 @@ volTex.magFilter = THREE.LinearFilter;
 // the shape's bounds rather than repeat.
 volTex.wrapS = volTex.wrapT = volTex.wrapR = THREE.ClampToEdgeWrapping;
 volTex.needsUpdate = true;
-particles.material.uniforms.uVelVolume.value = volTex;
-particleSim.setVolume(volTex, SIM_VOL_HALF);
+
+attachStartButton(true);
 
 // Standalone trail element — GPU-resident (own flow sim for the heads + a history
 // texture + instanced line ribbons; see gpuTrails.js). Cover page: seeded with
@@ -674,28 +791,9 @@ if (flowDots) {
   flowDots.spawnElapsed = 0;
 }
 
-// Sparse frozen dust — tiny world-fixed points wrapping around the camera for flythrough
-// spatial awareness (parallax). Not in the flow sim / paint / trails.
-const dust = FROZEN_DUST_ENABLED ? new FrozenDust() : null;
-if (dust) { scene.add(dust.object3D); dust.enabled = false; dust.opacity = 0; } // off during cover — enabled + faded in on Start (see animate()'s 'transitioning' branch)
-
-// Large soft mood ovals — frozen, wrap with camera, hue-shifted mood colour.
-const moodOrbs = MOOD_ORBS_ENABLED ? new MoodOrbs() : null;
-if (moodOrbs) { scene.add(moodOrbs.object3D); moodOrbs.enabled = false; moodOrbs.fadeMul = 0; }
-
-// Theme BGs — mood select picks cosmos|clouds|leaks at bake.
-// Construct the three select themes; enable exactly one. Shared BgColorMotion wash.
-const starryBg = new StarryBackground();
-const cloudSkyBg = new CloudSkyBackground();
-const lightLeakBg = new LightLeakBackground();
-scene.add(starryBg.object3D);
-scene.add(cloudSkyBg.object3D);
-scene.add(lightLeakBg.object3D);
-// Cover page: flat black, no theme BG. All fadeMul→0 (faded in on Start).
-starryBg.fadeMul = cloudSkyBg.fadeMul = lightLeakBg.fadeMul = 0;
-
 /** @param {'cosmos'|'clouds'|'leaks'|null} type */
 function applyBgType(type) {
+  if (!starryBg || !cloudSkyBg || !lightLeakBg) return;
   const t = (type === 'cosmos' || type === 'clouds' || type === 'leaks') ? type : 'clouds';
   starryBg.enabled = t === 'cosmos';
   starryBg.object3D.visible = starryBg.enabled;
@@ -720,14 +818,6 @@ function resolveBgType(mood) {
 function bakeBgType(mood) {
   applyBgType(resolveBgType(mood).type);
 }
-
-// Initial theme before audio bake — resolved from the cover mood so a themed BG
-// would be ready, but cover page keeps it fully faded (fadeMul=0 above); the
-// pick becomes visible once the transition fades it in.
-bakeBgType(coverMood);
-// Theme-agnostic elevation haze — sits above any BG, not mood-driven.
-const elevHaze = BG_HAZE_ENABLED ? new ElevationHaze() : null;
-if (elevHaze) { scene.add(elevHaze.object3D); elevHaze.enabled = false; elevHaze.fadeMul = 0; }
 
 const velocityBaker = new Worker(new URL('./particles/velocityBaker.worker.js', import.meta.url), { type: 'module' });
 let bakeJobId = 0;
@@ -890,12 +980,6 @@ function rerollCoverColor() {
   applyCoverColor();
 }
 rerollCoverColor();
-if (dust) dust.setColorHSL(trailColorMotion.current);
-if (moodOrbs) moodOrbs.setColorHSL(trailColorMotion.current);
-if (particles.material?.uniforms?.uColorHSL) {
-  const c = trailColorMotion.current;
-  particles.material.uniforms.uColorHSL.value.set(c.h, c.s, c.l);
-}
 
 // Background gradient: slow mood drift (similar↔contrast vs trails). No beat kick in v1.
 const bgColorCtl = {
@@ -905,9 +989,6 @@ const bgColorCtl = {
 const bgColorMotion = new BgColorMotion(bgColorCtl);
 {
   bgColorMotion.setFromMood({ energy: 0.5, brightness: 0.5, texture: 0.5, heaviness: 0.5, dynamism: 0.5, bpm: 120 });
-  if (starryBg) starryBg.setColors(bgColorMotion.top, bgColorMotion.bottom);
-  if (cloudSkyBg) cloudSkyBg.setColors(bgColorMotion.top, bgColorMotion.bottom);
-  if (lightLeakBg) lightLeakBg.setColors(bgColorMotion.top, bgColorMotion.bottom);
 }
 
 async function startAudio() {
@@ -965,9 +1046,9 @@ function applyRealTrackMood() {
   if (flowDots) flowDots.setColorHSL(trailColorMotion.current);
   if (dust) dust.setColorHSL(trailColorMotion.current);
   if (moodOrbs) moodOrbs.setColorHSL(trailColorMotion.current);
-  if (particles.material?.uniforms?.uColorHSL) {
+  if (u?.uColorHSL) {
     const c = trailColorMotion.current;
-    particles.material.uniforms.uColorHSL.value.set(c.h, c.s, c.l);
+    u.uColorHSL.value.set(c.h, c.s, c.l);
   }
   // Background gradient: snap with the RAW track mood (same family as trails).
   bgColorMotion.setFromMood(rawMood);
@@ -1253,28 +1334,14 @@ function loopBackToCover() {
   activeTrackSrc = null;
   bloomField.clear();
 
-  if (meshAddedToScene) { scene.remove(particles); meshAddedToScene = false; }
+  if (meshAddedToScene && particles) { scene.remove(particles); meshAddedToScene = false; }
 
-  // Neutral cover mood/warp order (module-level constants) — reused as-is so
-  // the mesh cloud (invisible, cosmetic-only during cover) and the shared
-  // velocity bake stay consistent every loop-back too.
   const mood = coverMood;
   const warpOrder = coverWarpOrder;
   baseMood = { ...mood };
   currentMood = { energy: 0.5, brightness: 0.5, texture: 0.5, heaviness: 0.5, dynamism: 0.5, bpm: 120 };
 
-  if (USE_MODEL && meshTypeCache) {
-    const mix = moodToMeshMix(mood, { budget: MESH_BUDGET });
-    particles.count = mix.totalCount;
-    lastMeshMix = mix;
-  }
-  resampleAll6(particles, mood.energy, mood.brightness, mood.texture,
-    mood.heaviness, mood.dynamism, mood.bpm, warpOrder, u, fieldDominance);
-  if (USE_MODEL && meshTypeCache && lastMeshMix) applyMeshMix(particles, lastMeshMix, meshTypeCache);
-  particleSim.resize(particles.count, particles.userData.seedPositions);
-  syncMeshSimUniforms();
-  if (picker?.setCount) picker.setCount(particles.count);
-  particleSim.mat.uniforms.uMaxLife.value = SIM_MAX_LIFE;
+  if (particleSim) particleSim.mat.uniforms.uMaxLife.value = SIM_MAX_LIFE;
 
   if (trail) {
     trail.killRadius = COVER_CLOUD_RADIUS;
@@ -1332,8 +1399,8 @@ function loopBackToCover() {
   if (moodOrbs) { moodOrbs.enabled = false; moodOrbs.fadeMul = 0; }
   if (elevHaze) { elevHaze.enabled = false; elevHaze.fadeMul = 0; }
   if (dust) { dust.enabled = false; dust.opacity = 0; }
-  starryBg.fadeMul = cloudSkyBg.fadeMul = lightLeakBg.fadeMul = 0;
-  u.uGlobalFadeIn.value = 0;
+  setThemeFade(0);
+  if (u) u.uGlobalFadeIn.value = 0;
 
   // Camera / controls back to the pivot-in-place orbit rig. Position MUST be
   // reset to the origin here — gameplay's flyControls has since flown the
@@ -1378,16 +1445,10 @@ function loopBackToCover() {
 // time the scene loops back to cover, since the previous one was removed.
 // logoEl follows the exact same lifecycle (created alongside the button,
 // removed on Start, recreated on loop-back) so the two fade in/out together.
-let startBtn = null;
-let uploadBtn = null;
-let logoEl = null;
-let logoIconEl = null;
-let adviceEl = null;
 // First load only: icon + advice sit through the black hold. Advice fades
 // out first; one second later title, buttons, and BG particles fade in
 // together. Loop-back skips icon/advice and fades title + buttons with
 // the particles.
-let coverUiPending = false;
 function fadeInCoverUi() {
   coverUiPending = false;
   const advice = adviceEl;
@@ -1405,7 +1466,8 @@ function fadeInCoverUi() {
   }, adviceFadeSec * 1000);
 }
 function revealCoverTitleUi() {
-  beginCoverSceneFade();
+  coverTitleRevealed = true;
+  maybeStartInitialCoverFadeIn();
   if (startBtn) startBtn.style.pointerEvents = '';
   if (uploadBtn) uploadBtn.style.pointerEvents = '';
   const fade = `opacity ${coverFadeInDuration}s ease`;
@@ -1444,7 +1506,8 @@ function attachStartButton(instant = false) {
     uploadBtn.style.opacity = '0';
     startBtn.style.pointerEvents = 'none';
     uploadBtn.style.pointerEvents = 'none';
-    coverUiPending = true;
+    coverUiPending = false;
+    fadeInCoverUi();
   } else {
     // Looped-back cover: hold UI at 0 until the volume bake lands, then
     // fade with the particles (maybeStartLoopBackCoverFadeIn → fadeInCoverUi).
@@ -1457,8 +1520,6 @@ function attachStartButton(instant = false) {
   }
   startBtn.addEventListener('click', startTransition, { once: true });
 }
-attachStartButton(true);
-
 function fadeOutCoverUi() {
   stopCoverHint();
   const els = [logoEl, logoIconEl, adviceEl, startBtn, uploadBtn].filter(Boolean);
@@ -1656,6 +1717,7 @@ function startTransition() {
   playButtonSfx();
   appPhase = 'transitioning';
   transitionStart = elapsed;
+  kickGameplayBoot();
   fadeOutCoverUi();
   fadeOutCoverBgm();
   resetTutorials();
@@ -1733,8 +1795,8 @@ bloomField.paintColor = paintColorFromMain(trailColorMotion.current);
 // make up most of what's on screen, so a mesh-only picker would miss most clicks.
 const picker = createParticlePicker({
   renderer, camera,
-  particleSim,
-  count: particles.count,
+  particleSim: null,
+  count: 0,
   trail,
   flowDots,
   onPick: (hit) => {
@@ -1755,52 +1817,49 @@ const picker = createParticlePicker({
 // both are still held at opacity/spawnFrac 0 at this point (see the initial-load
 // hold set right after their construction above), so nothing visibly renders.
 // Runs after the first frame so the GL context is fully ready.
-function warmupPaintShaders() {
+let coverWarmupStep = 0;
+function runCoverWarmupSlice() {
   const pos = camera.position;
   try {
-    if (trail) trail.warmupPaint(pos);
-    // Mesh sim already includes PAINT_GLSL; one step with a dummy bloom primes that path too.
-    const u = particleSim.mat.uniforms;
-    if (u.uBloomCount && u.uBloomA?.value?.[0]) {
-      const prev = u.uBloomCount.value;
-      u.uBloomCount.value = 1;
-      u.uBloomA.value[0].set(pos.x, pos.y, pos.z, 1.5);
-      u.uBloomB.value[0].set(1.0, 0.42, 1.0, 0.5);
-      u.uBloomC.value[0].set(0, 1, 0.35, 0.6);
-      u.uBloomD.value[0].set(1.4, 1.0, 2.5, 0.5);
-      particleSim.update(1 / 60, pos);
-      u.uBloomCount.value = prev;
+    switch (coverWarmupStep) {
+      case 0:
+        if (trail) trail.warmupPaint(pos);
+        break;
+      case 1:
+        if (trail) {
+          trail.update(1 / 60, pos, 0, camera, null, null);
+          trail.render(renderer, camera);
+        }
+        break;
+      case 2:
+        if (flowDots) flowDots.update(1 / 60, camera, 0, null);
+        break;
+      case 3:
+        renderer.compile(scene, camera);
+        break;
+      case 4:
+        composer.render();
+        initialWarmupDone = true;
+        maybeStartInitialCoverFadeIn();
+        return;
+      default:
+        initialWarmupDone = true;
+        maybeStartInitialCoverFadeIn();
+        return;
     }
-    // Prime the trail's advance/record GPGPU sim + its instanced ribbon-draw
-    // material (NOT part of the main scene graph — drawn manually in
-    // trail.render — so renderer.compile(scene, camera) below never touches
-    // it). Still opacity/spawnFrac 0 here, so the one forced draw is invisible.
-    if (trail) {
-      trail.update(1 / 60, pos, 0, camera, null, null);
-      trail.render(renderer, camera);
-    }
-    // FlowDots' sim likewise needs a manual prime (its render material IS in
-    // the scene graph — flowDots.object3D — so renderer.compile below covers
-    // that half; only the sim-side GPGPU shaders need this explicit step).
-    if (flowDots) flowDots.update(1 / 60, camera, 0, null);
-    renderer.compile(scene, camera);
   } catch (err) {
     console.warn('[warmup] paint shader warmup failed:', err);
-  } finally {
-    // Second half of the initial-load readiness gate (see initialBakeDone) —
-    // runs even if warmup partially failed, so a shader-compile hiccup can't
-    // permanently strand the cover page on a black hold.
     initialWarmupDone = true;
     maybeStartInitialCoverFadeIn();
+    return;
   }
+  coverWarmupStep++;
+  requestAnimationFrame(runCoverWarmupSlice);
 }
-requestAnimationFrame(() => requestAnimationFrame(warmupPaintShaders));
+requestAnimationFrame(() => requestAnimationFrame(runCoverWarmupSlice));
 
 // ── Animate ───────────────────────────────────────────────────────────────────
 
-const u = particles.material.uniforms;
-
-// ── Base-cloud shaping ────────────────────────────────────────────────────────
 // The base cloud is re-baked to the track's whole-track mood once when audio starts
 // (startAudio). The warp order (below) picks the top 1-2 fields as the domain-warp
 // chain; a fresh shuffle each rebake keeps A→B / B→A emergent variety.
@@ -1820,6 +1879,7 @@ const u = particles.material.uniforms;
 // Called on audio start (track mood, with reframe).
 // Also bakes the one-shot mood mesh mix (1 major + 2 accents) when type cache is ready.
 function applyBaseShape({ reframe = false } = {}) {
+  if (!particles || !particleSim || !u) return;
   const warpOrder = buildWarpOrder(baseMood);
 
   // One-shot mood BG theme (cosmos|clouds|leaks) — same bake as mesh mix / volume.
@@ -1859,7 +1919,7 @@ function applyBaseShape({ reframe = false } = {}) {
   // deferred scene.add() at fadeOutT>=1), so only trail/flowDots/bakeVolume
   // are skipped; they'll get their real reshape once startAudio() actually
   // calls applyBaseShape({reframe:true}).
-  if (appPhase === 'cover') return;
+  if (appPhase === 'cover' || (appPhase === 'transitioning' && !reframe)) return;
 
   if (trail) trail.reset(particles.userData.seedPositions);   // trails follow the new shape too
   if (flowDots) flowDots.reshape(baseMood, warpOrder, fieldDominance);
@@ -1900,26 +1960,17 @@ function applyBaseShape({ reframe = false } = {}) {
   if (reframe) frameCloudCamera(camera, controls, particles.userData.seedPositions);
 }
 
-// Kick mesh-mix bake once the five type libraries are in cache (neutral mood until audio).
-if (USE_MODEL) {
-  loadMeshTypeCache(MESH_TYPES)
-    .then((cache) => {
-      meshTypeCache = cache;
-      applyBaseShape({ reframe: false });
-    })
-    .catch((err) => console.warn('[models] mesh type cache failed — keeping cubes:', err));
-}
-
 function animate() {
   requestAnimationFrame(animate);
+  stepGameplayBoot();
 
   const dt = clock.getDelta();
   elapsed += dt;
   coverBgm.update(elapsed);
-  u.uTime.value = elapsed;
-  // Keep the mesh sprite-orientation's living-field warp in step with the sim (the sim
-  // advances its own copy in ParticleSim.update; the render shader just needs the clock).
-  if (u.uFieldWarpTime) u.uFieldWarpTime.value = elapsed;
+  if (u) {
+    u.uTime.value = elapsed;
+    if (u.uFieldWarpTime) u.uFieldWarpTime.value = elapsed;
+  }
 
   // Fly the camera forward + apply steering.
   controls.update(dt);
@@ -1987,7 +2038,7 @@ function animate() {
       // Mesh cloud's one-time shader-compile/texture-upload/sim-allocate cost
       // (previously paid during cover — see its creation above) now lands here
       // instead, on the solid black screen, so it's not visible either way.
-      if (!meshAddedToScene) { scene.add(particles); meshAddedToScene = true; }
+      if (particles && !meshAddedToScene) { scene.add(particles); meshAddedToScene = true; }
     }
 
     // startAudio() itself (decode + synchronous FFT analysis — the actual
@@ -2001,7 +2052,7 @@ function animate() {
     // The heavy reshape-to-track-mood step (resample/rebake/mesh-mix/sim-resize)
     // is also deliberately held off until the cover trail/dots are fully faded
     // to black, so whatever hitch it additionally causes also lands there.
-    if (readyToApplyTrackMood && fadeOutT >= 1) {
+    if (readyToApplyTrackMood && fadeOutT >= 1 && gameplayReady) {
       readyToApplyTrackMood = false;
       applyRealTrackMood();
     }
@@ -2019,7 +2070,7 @@ function animate() {
     if (bgFadeStart !== null) {
       bgT = Math.min(1, (elapsed - bgFadeStart) / TRANSITION_BG_FADE_TIME);
       maybeShowTutorial1(elapsed - bgFadeStart);
-      starryBg.fadeMul = cloudSkyBg.fadeMul = lightLeakBg.fadeMul = bgT;
+      setThemeFade(bgT);
       if (moodOrbs) moodOrbs.fadeMul = bgT;
       if (elevHaze) elevHaze.fadeMul = bgT;
       // FrozenDust has no fadeMul uniform — ramp its opacity directly instead,
@@ -2030,7 +2081,7 @@ function animate() {
       }
       vignetteEl.style.opacity = String(bgT);
     }
-    u.uGlobalFadeIn.value = bgT;
+    if (u) u.uGlobalFadeIn.value = bgT;
 
     if (transitionSpawnStart !== null) {
       // Only accumulate the ramp clock while the flow field is actually ready
@@ -2040,8 +2091,10 @@ function animate() {
       if (pendingBakeJobId === null) spawnRampElapsed += dt;
       const spawnElapsedSec = spawnRampElapsed;
       const st = Math.min(1, spawnElapsedSec / TRANSITION_SPAWN_RAMP_TIME);
-      u.uSpawnFrac.value = st;
-      u.uSpawnElapsed.value = spawnElapsedSec;
+      if (u) {
+        u.uSpawnFrac.value = st;
+        u.uSpawnElapsed.value = spawnElapsedSec;
+      }
       if (trail) { trail.opacity = TRAIL_OPACITY * bgT; trail.spawnFrac = st; trail.spawnElapsed = spawnElapsedSec; }
       if (flowDots) { flowDots.opacity = FLOW_DOTS_OPACITY * bgT; flowDots.spawnFrac = st; flowDots.spawnElapsed = spawnElapsedSec; }
       // Ramp's own population growth is done — start gradually easing the
@@ -2064,7 +2117,7 @@ function animate() {
         // across the whole window, spreading respawns out as intended.
         const invLife = THREE.MathUtils.lerp(1 / SPAWN_RAMP_MAX_LIFE, 1 / SIM_MAX_LIFE, lifeT);
         const life = 1 / invLife;
-        particleSim.mat.uniforms.uMaxLife.value = life;
+        if (particleSim) particleSim.mat.uniforms.uMaxLife.value = life;
         if (trail) trail.maxLife = life;
         if (flowDots) flowDots.maxLife = life;
       }
@@ -2083,10 +2136,10 @@ function animate() {
     const et = elapsed - endingStart;
     const fadeT = Math.min(1, et / ENDING_FADE_TIME);
     const inv = 1 - fadeT;
-    u.uGlobalFadeIn.value = inv;
+    if (u) u.uGlobalFadeIn.value = inv;
     if (trail) trail.opacity = TRAIL_OPACITY * inv;
     if (flowDots) flowDots.opacity = FLOW_DOTS_OPACITY * inv;
-    starryBg.fadeMul = cloudSkyBg.fadeMul = lightLeakBg.fadeMul = inv;
+    setThemeFade(inv);
     if (moodOrbs) moodOrbs.fadeMul = inv;
     if (elevHaze) elevHaze.fadeMul = inv;
     if (dust) dust.opacity = FROZEN_DUST_OPACITY * inv;
@@ -2162,7 +2215,7 @@ function animate() {
 
   // Mood-driven overall size (expressive channel): scales the render grain on top
   // of the panel's static band + streamline taper. Free uniform write, eased mood.
-  u.uSizeMoodScale.value = moodToSize(currentMood);
+  if (u?.uSizeMoodScale) u.uSizeMoodScale.value = moodToSize(currentMood);
 
   // Mood-driven trail spawn drift: intense → births slide farther downstream.
   if (trail) {
@@ -2180,9 +2233,9 @@ function animate() {
     lastAudioData = audioAnalyser.getAudioData();
     const m = audioMotion.update(lastAudioData, dt);
     flowSpeed.current *= m.flowMul;
-    u.uAudioTreble.value = m.treble;
+    if (u?.uAudioTreble) u.uAudioTreble.value = m.treble;
     trailAudio = { beat: m.beat, loud: m.loud };   // same beat source → trails react in sync
-  } else {
+  } else if (u?.uAudioTreble) {
     u.uAudioTreble.value = 0;
   }
   // Refresh the shared forward-direction scratch vector once per frame — used
@@ -2200,8 +2253,8 @@ function animate() {
   // appears already flowing correctly.
   const flowReadyNow = pendingBakeJobId === null;
   const effectiveFlowSpeed = flowReadyNow ? flowSpeed.current : 0;
-  particleSim.mat.uniforms.uFlowSpeed.value = effectiveFlowSpeed;
-  u.uFlowReady.value = flowReadyNow ? 1.0 : 0.0;
+  if (particleSim) particleSim.mat.uniforms.uFlowSpeed.value = effectiveFlowSpeed;
+  if (u) u.uFlowReady.value = flowReadyNow ? 1.0 : 0.0;
   if (trail) trail.flowReady = flowReadyNow ? 1.0 : 0.0;
   if (flowDots) flowDots.flowReady = flowReadyNow ? 1.0 : 0.0;
 
@@ -2223,7 +2276,7 @@ function animate() {
     if (flowDots) flowDots.setColorHSL(coverHsl);
     if (dust) dust.setColorHSL(hsl);
     if (moodOrbs) moodOrbs.setColorHSL(hsl);
-    if (u.uColorHSL) u.uColorHSL.value.set(hsl.h, hsl.s, hsl.l);
+    if (u?.uColorHSL) u.uColorHSL.value.set(hsl.h, hsl.s, hsl.l);
   }
 
   // Theme BG: mood colour wash + structure (cosmos / clouds / leaks).
@@ -2261,32 +2314,32 @@ function animate() {
   const simDt = runSimThisFrame ? simTickAccum : 0;
   if (runSimThisFrame) simTickAccum = 0;
 
-  if (runSimThisFrame) {
-    // Standalone trails: advect along the same volume at the live flow speed (GPU),
+  if (runSimThisFrame && (appPhase !== 'cover' || initialWarmupDone)) {
     // react to the shared audio motion (brightness flare + length + speed whip), and
     // feel the same click-paint blooms (scaled by trail.paintStrength).
     if (trail) trail.update(simDt, camera.position, effectiveFlowSpeed, camera, trailAudio, { field: bloomField, elapsed });
 
     // Mesh GPGPU sim is unused on cover (cloud not in the scene). Skip until
     // fadeOutT>=1 adds it — shaders are already primed by warmupPaintShaders().
-    if (meshAddedToScene) {
+    if (meshAddedToScene && particleSim && u) {
       bloomField.syncUniforms(particleSim.mat.uniforms, camera.position, elapsed);
       particleSim.update(simDt, camera.position, camFwd);
       u.uSimPos.value = particleSim.getPositionTexture();
       u.uSimCell.value = particleSim.getCellTexture();
     }
   }
-  u.uCamPos.value.copy(camera.position);
-  u.uCamFwd.value.copy(camFwd);   // look axis → forward-biased cloud fade (shared with the sims' respawn reach)
+  if (u?.uCamPos) u.uCamPos.value.copy(camera.position);
+  if (u?.uCamFwd) u.uCamFwd.value.copy(camFwd);
 
   // Flowing light dots: same volume / paint / flow speed, own sim + cheap Points.
-  if (runSimThisFrame && flowDots) flowDots.update(simDt, camera, effectiveFlowSpeed, { field: bloomField, elapsed });
+  if (runSimThisFrame && flowDots && (appPhase !== 'cover' || initialWarmupDone)) flowDots.update(simDt, camera, effectiveFlowSpeed, { field: bloomField, elapsed });
 
   // Cover page: route through the FXAA composer (see TrailPass/updateComposerSize
   // above) for cheap antialiasing. Gameplay uses the original direct path — no
   // AA overhead during the fill-rate-sensitive phase.
   if (appPhase === 'cover') {
-    composer.render();
+    if (initialWarmupDone) composer.render();
+    else renderer.clear();
   } else {
     renderer.render(scene, camera);
     // Trails draw last, straight onto the screen — they share the meshes' depth buffer, so

@@ -56,6 +56,7 @@ export function createParticlePicker({
   const cfg = { clusterRadius, clusterMin, lensGuard, pixelRadius };
   // Mesh mix can change particle count at track bake — keep pick loop in sync.
   let liveCount = count;
+  let meshSim = particleSim;
 
   // ── Picking ──────────────────────────────────────────────────────────────────
   // One readback buffer PER SOURCE (each sim has its own texture size), reused
@@ -112,8 +113,10 @@ export function createParticlePicker({
       }
     };
 
-    posBufMesh = particleSim.readPositions(posBufMesh);
-    gather(posBufMesh, liveCount);
+    if (meshSim) {
+      posBufMesh = meshSim.readPositions(posBufMesh);
+      gather(posBufMesh, liveCount);
+    }
     if (trail?.sim) {
       posBufTrail = trail.sim.readPositions(posBufTrail);
       gather(posBufTrail, trail.count);
@@ -200,7 +203,8 @@ export function createParticlePicker({
   return {
     pick,
     cfg,
-    setCount(n) { liveCount = Math.max(1, n | 0); },
+    setCount(n) { liveCount = Math.max(0, n | 0); },
+    setParticleSim(sim) { meshSim = sim || null; },
     setClusterMin(v) { cfg.clusterMin = v; },
     setClusterRadius(v) { cfg.clusterRadius = v; },
     dispose() {

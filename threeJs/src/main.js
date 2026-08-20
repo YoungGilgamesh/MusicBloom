@@ -391,9 +391,13 @@ function beginCoverSceneFade() {
 }
 function maybeStartInitialCoverFadeIn() {
   if (coverFadeArmed) return;
-  if (!initialBakeDone || !initialWarmupDone || !coverTitleRevealed) return;
+  if (!initialBakeDone || !initialWarmupDone) return;
+  if (coverUiPending) {
+    fadeInCoverUi();
+    return;
+  }
   if (coverFadeInStart !== null) return;
-  beginCoverSceneFade();
+  if (coverTitleRevealed) beginCoverSceneFade();
 }
 function maybeStartLoopBackCoverFadeIn() {
   if (!coverFadeArmed || pendingBakeJobId !== null || coverFadeInStart !== null || coverFadeScheduled) return;
@@ -1506,8 +1510,7 @@ function attachStartButton(instant = false) {
     uploadBtn.style.opacity = '0';
     startBtn.style.pointerEvents = 'none';
     uploadBtn.style.pointerEvents = 'none';
-    coverUiPending = false;
-    fadeInCoverUi();
+    coverUiPending = true;
   } else {
     // Looped-back cover: hold UI at 0 until the volume bake lands, then
     // fade with the particles (maybeStartLoopBackCoverFadeIn → fadeInCoverUi).

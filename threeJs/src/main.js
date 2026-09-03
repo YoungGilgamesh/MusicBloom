@@ -1,24 +1,6 @@
-import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { Pass } from 'three/addons/postprocessing/Pass.js';
-import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { assetUrl } from './assetUrl.js';
-import { createQuantumCloud, applyMeshMix, resampleAll6 } from './particles/createQuantumCloud.js';
-import { loadMeshTypeCache } from './particles/particleModels.js';
-import { ParticleSim } from './particles/particleSim.js';
 import { moodToMeshMix } from './audio/moodToMeshMix.js';
 import { moodToBgType } from './audio/moodToBgType.js';
-import { GPUTrails } from './particles/gpuTrails.js';
-import { FrozenDust } from './particles/frozenDust.js';
-import { FlowDots } from './particles/flowDots.js';
-import { createFlyControls } from './interaction/flyControls.js';
-import { createOrbitControls } from './camera/orbitControls.js';
-import { frameCloudCamera } from './camera/frameCloud.js';
-import { createParticlePicker } from './interaction/particlePick.js';
-import { attachFullscreenToggle } from './interaction/fullscreenToggle.js';
-import { playResultBloom2d, playResultGather2d } from './interaction/resultBloom2d.js';
 import { BloomField } from './interaction/bloomField.js';
 import { createPrecomputedAnalyser } from './audio/audioPrecompute.js';
 import { createCoverBgm } from './audio/coverBgm.js';
@@ -31,11 +13,6 @@ import { AudioMotion } from './audio/audioMotion.js';
 import { TrailColorMotion, measureTrackColorHueSpan } from './audio/trailColorMotion.js';
 import { paintColorFromMain } from './audio/moodToPaintColor.js';
 import { BgColorMotion } from './audio/bgColorMotion.js';
-import { StarryBackground } from './scene/starryBackground.js';
-import { CloudSkyBackground } from './scene/cloudSkyBackground.js';
-import { LightLeakBackground } from './scene/lightLeakBackground.js';
-import { ElevationHaze } from './scene/elevationHaze.js';
-import { MoodOrbs } from './scene/moodOrbs.js';
 import {
   BG_COLOR,
   CAMERA_FOV,
@@ -163,6 +140,150 @@ import {
   SIM_MAX_LIFE,
 } from './config.js';
 
+// Three / GPU modules stay off the first parse so boot.js can paint the
+// static headphones HTML before this graph compiles. Filled in below.
+let THREE;
+let EffectComposer;
+let RenderPass;
+let ShaderPass;
+let Pass;
+let FXAAShader;
+let createQuantumCloud;
+let applyMeshMix;
+let resampleAll6;
+let loadMeshTypeCache;
+let ParticleSim;
+let GPUTrails;
+let FrozenDust;
+let FlowDots;
+let createFlyControls;
+let createOrbitControls;
+let frameCloudCamera;
+let createParticlePicker;
+let attachFullscreenToggle;
+let playResultBloom2d;
+let playResultGather2d;
+let StarryBackground;
+let CloudSkyBackground;
+let LightLeakBackground;
+let ElevationHaze;
+let MoodOrbs;
+let gameplayModsReady = false;
+let gameplayModsPromise = null;
+
+function waitFrames(n = 1) {
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (--n <= 0) resolve();
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+async function loadThreeStack() {
+  const [
+    threeMod,
+    composerMod,
+    renderPassMod,
+    shaderPassMod,
+    passMod,
+    fxaaMod,
+  ] = await Promise.all([
+    import('three'),
+    import('three/addons/postprocessing/EffectComposer.js'),
+    import('three/addons/postprocessing/RenderPass.js'),
+    import('three/addons/postprocessing/ShaderPass.js'),
+    import('three/addons/postprocessing/Pass.js'),
+    import('three/addons/shaders/FXAAShader.js'),
+  ]);
+  THREE = threeMod;
+  EffectComposer = composerMod.EffectComposer;
+  RenderPass = renderPassMod.RenderPass;
+  ShaderPass = shaderPassMod.ShaderPass;
+  Pass = passMod.Pass;
+  FXAAShader = fxaaMod.FXAAShader;
+}
+
+async function loadCoverGpu() {
+  const [
+    trailsMod,
+    dotsMod,
+    orbitMod,
+    pickMod,
+    flyMod,
+    frameMod,
+    fsMod,
+    resultMod,
+  ] = await Promise.all([
+    import('./particles/gpuTrails.js'),
+    import('./particles/flowDots.js'),
+    import('./camera/orbitControls.js'),
+    import('./interaction/particlePick.js'),
+    import('./interaction/flyControls.js'),
+    import('./camera/frameCloud.js'),
+    import('./interaction/fullscreenToggle.js'),
+    import('./interaction/resultBloom2d.js'),
+  ]);
+  GPUTrails = trailsMod.GPUTrails;
+  FlowDots = dotsMod.FlowDots;
+  createOrbitControls = orbitMod.createOrbitControls;
+  createParticlePicker = pickMod.createParticlePicker;
+  createFlyControls = flyMod.createFlyControls;
+  frameCloudCamera = frameMod.frameCloudCamera;
+  attachFullscreenToggle = fsMod.attachFullscreenToggle;
+  playResultBloom2d = resultMod.playResultBloom2d;
+  playResultGather2d = resultMod.playResultGather2d;
+}
+
+function ensureGameplayMods() {
+  if (gameplayModsPromise) return gameplayModsPromise;
+  gameplayModsPromise = loadGameplayGpu();
+  return gameplayModsPromise;
+}
+
+async function loadGameplayGpu() {
+  const [
+    cloudMod,
+    modelsMod,
+    simMod,
+    dustMod,
+    starryMod,
+    skyMod,
+    leakMod,
+    hazeMod,
+    orbsMod,
+  ] = await Promise.all([
+    import('./particles/createQuantumCloud.js'),
+    import('./particles/particleModels.js'),
+    import('./particles/particleSim.js'),
+    import('./particles/frozenDust.js'),
+    import('./scene/starryBackground.js'),
+    import('./scene/cloudSkyBackground.js'),
+    import('./scene/lightLeakBackground.js'),
+    import('./scene/elevationHaze.js'),
+    import('./scene/moodOrbs.js'),
+  ]);
+  createQuantumCloud = cloudMod.createQuantumCloud;
+  applyMeshMix = cloudMod.applyMeshMix;
+  resampleAll6 = cloudMod.resampleAll6;
+  loadMeshTypeCache = modelsMod.loadMeshTypeCache;
+  ParticleSim = simMod.ParticleSim;
+  FrozenDust = dustMod.FrozenDust;
+  StarryBackground = starryMod.StarryBackground;
+  CloudSkyBackground = skyMod.CloudSkyBackground;
+  LightLeakBackground = leakMod.LightLeakBackground;
+  ElevationHaze = hazeMod.ElevationHaze;
+  MoodOrbs = orbsMod.MoodOrbs;
+  gameplayModsReady = true;
+}
+
+async function startApp() {
+// Yield so the static HTML can paint, then compile Three, then open WebGL.
+await waitFrames(1);
+await loadThreeStack();
+await waitFrames(1);
+
 // ── Scene setup ───────────────────────────────────────────────────────────────
 
 const scene = new THREE.Scene();
@@ -258,6 +379,9 @@ Object.assign(vignetteEl.style, {
   background: `radial-gradient(ellipse at center, transparent ${VIGNETTE_SIZE}%, rgba(0,0,0,${VIGNETTE_STRENGTH}) 100%)`,
 });
 document.body.appendChild(vignetteEl);
+
+await loadCoverGpu();
+await waitFrames(1);
 
 // ── Cover page / gameplay phase machine ───────────────────────────────────────
 // 'cover' = attract-mode splash (orbit camera, trail/dots only, random shape,
@@ -601,14 +725,20 @@ function ensureMeshCloud() {
 function kickGameplayBoot() {
   if (gameplayReady || gameplayBootStep >= 0) return;
   gameplayBootStep = 0;
-  if (USE_MODEL && !meshTypeCache) {
-    loadMeshTypeCache(MESH_TYPES).then(onMeshTypeCache)
-      .catch((err) => console.warn('[models] mesh type cache failed — keeping cubes:', err));
-  }
+  ensureGameplayMods().then(() => {
+    if (USE_MODEL && !meshTypeCache && loadMeshTypeCache) {
+      loadMeshTypeCache(MESH_TYPES).then(onMeshTypeCache)
+        .catch((err) => console.warn('[models] mesh type cache failed — keeping cubes:', err));
+    }
+  });
 }
 
 function stepGameplayBoot() {
   if (gameplayReady || gameplayBootStep < 0) return;
+  if (!gameplayModsReady) {
+    ensureGameplayMods();
+    return;
+  }
   try {
     switch (gameplayBootStep) {
       case 0:
@@ -1472,11 +1602,16 @@ function attachStartButton(instant = false) {
   startBtn = createStartButton();
   uploadBtn = createUploadButton();
   if (instant) {
-    // First page load: icon on from the black hold (same slot as the title).
-    // Title + buttons fade in with the particles (maybeStartInitialCoverFadeIn).
-    logoIconEl = createLogoIcon();
+    // First page load: icon + advice already live in index.html so the tab
+    // can paint them before this module compiles. Adopt those nodes.
+    if (!logoIconEl) logoIconEl = document.getElementById('cover-logo-icon');
+    if (!logoIconEl) logoIconEl = createLogoIcon();
+    if (!adviceEl) adviceEl = document.getElementById('cover-advice');
+    if (!adviceEl) adviceEl = createAdvice();
+    const fade = `opacity ${COVER_FADEOUT_TIME}s ease`;
+    logoIconEl.style.transition = fade;
+    adviceEl.style.transition = fade;
     logoIconEl.style.opacity = '1';
-    adviceEl = createAdvice();
     adviceEl.style.opacity = '1';
     logoEl.style.opacity = '0';
     startBtn.style.opacity = '0';
@@ -1823,16 +1958,19 @@ function runCoverBootSlice() {
       case 6:
         composer.render();
         initialWarmupDone = true;
+        ensureGameplayMods();
         maybeStartInitialCoverFadeIn();
         return;
       default:
         initialWarmupDone = true;
+        ensureGameplayMods();
         maybeStartInitialCoverFadeIn();
         return;
     }
   } catch (err) {
     console.warn('[warmup] cover boot slice failed:', err);
     initialWarmupDone = true;
+    ensureGameplayMods();
     maybeStartInitialCoverFadeIn();
     return;
   }
@@ -2383,6 +2521,12 @@ function ensureCoverUiStyles() {
       bottom: max(12px, env(safe-area-inset-bottom, 0px));
       width: min(16vw, 120px, 14svh);
     }
+    .cover-mark,
+    .cover-advice,
+    .cover-start,
+    .cover-upload {
+      z-index: 5;
+    }
     .cover-mark {
       top: 50%;
       top: 50svh;
@@ -2586,36 +2730,40 @@ function refreshRenderer() {
 // ANY window at this ratio, not just touch devices — desktop windows resized
 // down to portrait get the same overlay (simpler than trying to distinguish
 // "meant to be narrow" desktop use from an actual phone in portrait).
-const rotateOverlay = document.createElement('div');
-Object.assign(rotateOverlay.style, {
-  position: 'fixed',
-  // Explicit top/left/right/bottom rather than the 'inset' shorthand — inset
-  // is unsupported on some older mobile WebViews, which would silently leave
-  // this fixed element sized to its (tiny) content instead of covering the
-  // screen.
-  top: '0',
-  left: '0',
-  right: '0',
-  bottom: '0',
-  width: '100%',
-  height: '100%',
-  zIndex: '1000',
-  display: 'none',
-  flexDirection: 'column',
-  alignItems: 'center',
-  justifyContent: 'center',
-  background: '#000',
-  color: '#fff',
-  fontFamily: "'Roboto', sans-serif",
-  fontWeight: '700',
-  fontSize: '18px',
-  letterSpacing: '0.08em',
-  textAlign: 'center',
-  lineHeight: '2',
-  pointerEvents: 'none',
-});
-rotateOverlay.innerHTML = '<div>Rotate your device</div><div>for better experience</div>';
-document.body.appendChild(rotateOverlay);
+let rotateOverlay = document.getElementById('rotate-overlay');
+if (!rotateOverlay) {
+  rotateOverlay = document.createElement('div');
+  rotateOverlay.id = 'rotate-overlay';
+  Object.assign(rotateOverlay.style, {
+    position: 'fixed',
+    // Explicit top/left/right/bottom rather than the 'inset' shorthand — inset
+    // is unsupported on some older mobile WebViews, which would silently leave
+    // this fixed element sized to its (tiny) content instead of covering the
+    // screen.
+    top: '0',
+    left: '0',
+    right: '0',
+    bottom: '0',
+    width: '100%',
+    height: '100%',
+    zIndex: '1000',
+    display: 'none',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#000',
+    color: '#fff',
+    fontFamily: "'Roboto', sans-serif",
+    fontWeight: '700',
+    fontSize: '18px',
+    letterSpacing: '0.08em',
+    textAlign: 'center',
+    lineHeight: '2',
+    pointerEvents: 'none',
+  });
+  rotateOverlay.innerHTML = '<div>Rotate your device</div><div>for better experience</div>';
+  document.body.appendChild(rotateOverlay);
+}
 
 function isNarrowWindow() {
   return window.innerHeight > window.innerWidth;
@@ -2625,5 +2773,8 @@ function updateOrientationOverlay() {
 }
 updateOrientationOverlay();
 window.addEventListener('orientationchange', updateOrientationOverlay);
+}
+
+startApp();
 
 

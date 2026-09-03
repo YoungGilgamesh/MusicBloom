@@ -8,7 +8,10 @@
   <link rel="icon" href="%BASE_URL%web_icon.ico" type="image/x-icon" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet" />
+  </noscript>
   <style>
     * {
       margin: 0;
@@ -31,11 +34,82 @@
       height: 100%;
       touch-action: none;
     }
+
+    /* First-paint cover (no JS). z-index keeps these above the canvas once it mounts. */
+    .cover-mark,
+    .cover-advice,
+    .cover-start,
+    .cover-upload {
+      z-index: 5;
+    }
+
+    .cover-mark {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      top: 50svh;
+      transform: translate(-50%, -50%);
+      max-width: min(48%, 460px);
+      max-height: 28%;
+      max-height: 22svh;
+      width: auto;
+      height: auto;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .cover-advice {
+      position: fixed;
+      left: calc(50% - 6px);
+      top: calc(50% + 40px);
+      top: calc(50svh + min(40px, 8svh));
+      transform: translateX(-50%);
+      width: min(26vw, 165px);
+      height: auto;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    #rotate-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1000;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      color: #fff;
+      font-family: 'Roboto', system-ui, sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: 0.08em;
+      text-align: center;
+      line-height: 2;
+      pointer-events: none;
+    }
+
+    @media (orientation: portrait) {
+      #rotate-overlay {
+        display: flex;
+      }
+    }
   </style>
 </head>
 
 <body>
-  <script type="module" src="/src/main.js"></script>
+  <img id="cover-logo-icon" class="cover-mark" src="%BASE_URL%images/cover/musicBloom_icon.png" alt="" />
+  <img id="cover-advice" class="cover-advice" src="%BASE_URL%images/cover/advice.png" alt="" />
+  <div id="rotate-overlay">
+    <div>Rotate your device</div>
+    <div>for better experience</div>
+  </div>
+  <script type="module" src="/src/boot.js"></script>
 </body>
 
 </html>

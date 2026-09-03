@@ -57,6 +57,8 @@ export function createParticlePicker({
   // Mesh mix can change particle count at track bake — keep pick loop in sync.
   let liveCount = count;
   let meshSim = particleSim;
+  let trailSrc = trail;
+  let dotsSrc = flowDots;
 
   // ── Picking ──────────────────────────────────────────────────────────────────
   // One readback buffer PER SOURCE (each sim has its own texture size), reused
@@ -87,7 +89,7 @@ export function createParticlePicker({
     const radiusSq = cfg.pixelRadius * cfg.pixelRadius;
 
     // 1. Gather candidates under the cursor, across every enabled source.
-    const maxTotal = liveCount + (trail?.count ?? 0) + (flowDots?.count ?? 0);
+    const maxTotal = liveCount + (trailSrc?.count ?? 0) + (dotsSrc?.count ?? 0);
     ensureCap(maxTotal);
     let k = 0;
     const gather = (posBuf, n) => {
@@ -117,13 +119,13 @@ export function createParticlePicker({
       posBufMesh = meshSim.readPositions(posBufMesh);
       gather(posBufMesh, liveCount);
     }
-    if (trail?.sim) {
-      posBufTrail = trail.sim.readPositions(posBufTrail);
-      gather(posBufTrail, trail.count);
+    if (trailSrc?.sim) {
+      posBufTrail = trailSrc.sim.readPositions(posBufTrail);
+      gather(posBufTrail, trailSrc.count);
     }
-    if (flowDots?.sim) {
-      posBufDots = flowDots.sim.readPositions(posBufDots);
-      gather(posBufDots, flowDots.count);
+    if (dotsSrc?.sim) {
+      posBufDots = dotsSrc.sim.readPositions(posBufDots);
+      gather(posBufDots, dotsSrc.count);
     }
 
     if (k === 0) {                                   // nothing under the cursor
@@ -205,6 +207,8 @@ export function createParticlePicker({
     cfg,
     setCount(n) { liveCount = Math.max(0, n | 0); },
     setParticleSim(sim) { meshSim = sim || null; },
+    setTrail(next) { trailSrc = next || null; },
+    setFlowDots(next) { dotsSrc = next || null; },
     setClusterMin(v) { cfg.clusterMin = v; },
     setClusterRadius(v) { cfg.clusterRadius = v; },
     dispose() {

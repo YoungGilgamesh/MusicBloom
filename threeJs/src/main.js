@@ -544,6 +544,8 @@ function restoreTiling(uniforms) {
 let particles = null;
 let particleSim = null;
 let u = null;
+let trail = null;
+let flowDots = null;
 let meshTypeCache = null;
 let lastMeshMix = null;
 let dust = null;
@@ -703,36 +705,13 @@ volTex.needsUpdate = true;
 
 attachStartButton(true);
 
-// Standalone trail element — GPU-resident (own flow sim for the heads + a history
-// texture + instanced line ribbons; see gpuTrails.js). Cover page: seeded with
-// its OWN random points inside a sphere around the camera (see
-// randomSeedsInSphere above) — NOT derived from the mesh cloud's shape, since
-// cover no longer previews any particular track's shape.
-const trail = TRAIL_ENABLED
-  ? new GPUTrails(renderer, { seedPositions: randomSeedsInSphere(TRAIL_COUNT, COVER_CLOUD_RADIUS), volTex, volHalf: SIM_VOL_HALF })
-  : null;
-// NOTE: trails are NOT added to the main scene — they're drawn in a second pass straight
-// onto the screen (sharing the meshes' depth) after the main render (see trail.render).
-if (trail) {
-  // Single radius controls both the seed sphere (above) and the recycle
-  // shell — see COVER_CLOUD_RADIUS's comment in config.js (replaces the old
-  // COVER_KILL_RADIUS_SCALE × COVER_OUTER_TIGHTEN × COVER_SHAPE_SCALE chain).
+function applyCoverTrailSetup() {
+  if (!trail) return;
   trail.killRadius = COVER_CLOUD_RADIUS;
   trail.nearCull = COVER_CLOUD_RADIUS * COVER_NEAR_CULL_FRAC;
   trail.farCull = COVER_CLOUD_RADIUS;
-  // Cover page doesn't need the traveling brightness pulse (a constant
-  // ambient "light running along the ribbon" effect) — it's a gameplay-feel
-  // accent that reads as unnecessary motion/noise on the calmer attract-mode
-  // page. Restored to TRAIL_PULSE_STRENGTH once the cover fadeout finishes
-  // (see animate()'s 'transitioning' branch, fadeOutT>=1).
   trail.pulseStrength = 0;
-  // Cover page never flies forward (orbitControls only rotates in place) —
-  // the forward-bias respawn/fade has no reason to apply here; force
-  // symmetric. Restored to CLOUD_BEHIND_FRAC once real forward flight begins.
   trail.behindFrac = 1.0;
-  // Ribbon width/sample spacing scaled to COVER_CLOUD_RADIUS's proportion of
-  // the real gameplay bubble, so ribbons read as distinct streaks rather than
-  // overlapping blobs. Restored to the real, unscaled values on transition.
   const coverSizeRatio = COVER_CLOUD_RADIUS / SIM_KILL_RADIUS;
   trail.width = TRAIL_WIDTH * coverSizeRatio * COVER_TRAIL_WIDTH_MUL;
   trail.taperTail = COVER_TRAIL_TAPER_TAIL;
@@ -740,39 +719,15 @@ if (trail) {
   trail.sampleMinDist = TRAIL_SAMPLE_MIN_DIST * coverSizeRatio;
   trail.sampleMaxDist = TRAIL_SAMPLE_MAX_DIST * coverSizeRatio;
   trail.samplePaintMinDist = TRAIL_SAMPLE_PAINT_MIN_DIST * coverSizeRatio;
-  // Cover-only: disable depth-write on the ribbon material. Cover's denser,
-  // more clustered cloud makes trails cross/overlap far more than gameplay,
-  // and depth-write ON there causes z-fighting flicker where ribbons are
-  // near-coincident in depth. Losing strict nearer-occludes-farther ordering
-  // between overlapping trails is an acceptable trade for a glowy cover cloud.
-  // Restored to true once real gameplay begins (see the fadeOutT>=1 branch).
   trail.material.depthWrite = false;
-  // No tiling lattice for cover's single non-tiled cloud (see disableTiling's
-  // comment above) — restored to the real gameplay constants on transition.
   disableTiling(trail.sim.mat.uniforms);
-  // Initial page load: hold at zero population/opacity until the async volume
-  // bake + first-use shader compile are both confirmed done (see
-  // loadingReady/animate()'s initial-fade block below) — otherwise the very
-  // first frames show a frozen (or literally invisible, via uFlowReady) cloud
-  // for a beat before motion suddenly kicks in. Faded in together with flowDots
-  // once ready, over INITIAL_LOAD_FADE_TIME.
   trail.opacity = 0;
   trail.spawnFrac = 0;
   trail.spawnElapsed = 0;
 }
 
-// Cheap flowing light dots — additional Points on their own sim (FLOW_DOTS_COUNT).
-// Cover page: also seeded with its own random sphere positions (see trail above).
-const flowDots = FLOW_DOTS_ENABLED
-  ? new FlowDots(renderer, {
-    count: Math.max(1, FLOW_DOTS_COUNT | 0),
-    volTex,
-    volHalf: SIM_VOL_HALF,
-    mood: coverMood,
-    warpOrder: coverWarpOrder,
-  })
-  : null;
-if (flowDots) {
+function applyCoverDotsSetup() {
+  if (!flowDots) return;
   scene.add(flowDots.object3D);
   flowDots.killRadius = COVER_CLOUD_RADIUS;
   flowDots.nearFadeStart = COVER_CLOUD_RADIUS * COVER_NEAR_FADE_START_FRAC;
@@ -780,19 +735,37 @@ if (flowDots) {
   flowDots.behindFrac = 1.0;
   const coverSizeRatio = COVER_CLOUD_RADIUS / SIM_KILL_RADIUS;
   flowDots.size = FLOW_DOTS_SIZE * coverSizeRatio * COVER_FLOW_DOTS_SIZE_MUL;
-  // Overwrite FlowDots' own (mood-shape-sampled) seed positions with our
-  // random-sphere ones, then reset its sim so they take effect immediately.
   flowDots.seedPositions = randomSeedsInSphere(Math.max(1, FLOW_DOTS_COUNT | 0), COVER_CLOUD_RADIUS);
   flowDots.sim.reset(flowDots.seedPositions);
-  // No tiling lattice for cover — see disableTiling's comment above. FlowDots'
-  // OWN render material also samples the velocity field (for stretch
-  // direction), so it needs the same override as the sim.
   disableTiling(flowDots.sim.mat.uniforms);
   disableTiling(flowDots.material.uniforms);
-  // Same initial-load hold as the trail above — see that comment.
   flowDots.opacity = 0;
   flowDots.spawnFrac = 0;
   flowDots.spawnElapsed = 0;
+}
+
+function ensureCoverTrails() {
+  if (trail || !TRAIL_ENABLED) return;
+  trail = new GPUTrails(renderer, {
+    seedPositions: randomSeedsInSphere(TRAIL_COUNT, COVER_CLOUD_RADIUS),
+    volTex,
+    volHalf: SIM_VOL_HALF,
+  });
+  applyCoverTrailSetup();
+  if (picker?.setTrail) picker.setTrail(trail);
+}
+
+function ensureCoverDots() {
+  if (flowDots || !FLOW_DOTS_ENABLED) return;
+  flowDots = new FlowDots(renderer, {
+    count: Math.max(1, FLOW_DOTS_COUNT | 0),
+    volTex,
+    volHalf: SIM_VOL_HALF,
+    mood: coverMood,
+    warpOrder: coverWarpOrder,
+  });
+  applyCoverDotsSetup();
+  if (picker?.setFlowDots) picker.setFlowDots(flowDots);
 }
 
 /** @param {'cosmos'|'clouds'|'leaks'|null} type */
@@ -1819,27 +1792,35 @@ const picker = createParticlePicker({
 // both are still held at opacity/spawnFrac 0 at this point (see the initial-load
 // hold set right after their construction above), so nothing visibly renders.
 // Runs after the first frame so the GL context is fully ready.
-let coverWarmupStep = 0;
-function runCoverWarmupSlice() {
+let coverBootStep = 0;
+function runCoverBootSlice() {
   const pos = camera.position;
   try {
-    switch (coverWarmupStep) {
+    switch (coverBootStep) {
       case 0:
-        if (trail) trail.warmupPaint(pos);
+        ensureCoverTrails();
+        applyCoverColor();
         break;
       case 1:
+        ensureCoverDots();
+        applyCoverColor();
+        break;
+      case 2:
+        if (trail) trail.warmupPaint(pos);
+        break;
+      case 3:
         if (trail) {
           trail.update(1 / 60, pos, 0, camera, null, null);
           trail.render(renderer, camera);
         }
         break;
-      case 2:
+      case 4:
         if (flowDots) flowDots.update(1 / 60, camera, 0, null);
         break;
-      case 3:
+      case 5:
         renderer.compile(scene, camera);
         break;
-      case 4:
+      case 6:
         composer.render();
         initialWarmupDone = true;
         maybeStartInitialCoverFadeIn();
@@ -1850,15 +1831,16 @@ function runCoverWarmupSlice() {
         return;
     }
   } catch (err) {
-    console.warn('[warmup] paint shader warmup failed:', err);
+    console.warn('[warmup] cover boot slice failed:', err);
     initialWarmupDone = true;
     maybeStartInitialCoverFadeIn();
     return;
   }
-  coverWarmupStep++;
-  requestAnimationFrame(runCoverWarmupSlice);
+  coverBootStep++;
+  requestAnimationFrame(runCoverBootSlice);
 }
-requestAnimationFrame(() => requestAnimationFrame(runCoverWarmupSlice));
+// Two frames so the headphones advice can paint before GPU construction.
+requestAnimationFrame(() => requestAnimationFrame(runCoverBootSlice));
 
 // ── Animate ───────────────────────────────────────────────────────────────────
 

@@ -70,6 +70,26 @@
       user-select: none;
     }
 
+    #boot-bar {
+      position: fixed;
+      z-index: 5;
+      left: 50%;
+      top: calc(50% + 72px);
+      top: calc(50svh + min(40px, 8svh) + 32px);
+      transform: translateX(-50%);
+      width: min(26vw, 165px);
+      height: 2px;
+      background: rgba(255, 255, 255, 0.2);
+      pointer-events: none;
+    }
+
+    #boot-bar-fill {
+      height: 100%;
+      width: 8%;
+      background: rgba(255, 255, 255, 0.9);
+      transition: width 0.35s ease;
+    }
+
     #rotate-overlay {
       position: fixed;
       top: 0;
@@ -105,6 +125,7 @@
 <body>
   <img id="cover-logo-icon" class="cover-mark" src="%BASE_URL%images/cover/musicBloom_icon.png" alt="" />
   <img id="cover-advice" class="cover-advice" src="%BASE_URL%images/cover/advice.png" alt="" />
+  <div id="boot-bar" aria-hidden="true"><div id="boot-bar-fill"></div></div>
   <div id="rotate-overlay">
     <div>Rotate your device</div>
     <div>for better experience</div>

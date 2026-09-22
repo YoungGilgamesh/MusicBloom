@@ -119,7 +119,10 @@ export class GPUTrails {
    * @param {THREE.Data3DTexture} [opts.volTex]
    * @param {number}       [opts.volHalf]
    */
-  constructor(renderer, { count = TRAIL_COUNT, seedPositions = null, volTex = null, volHalf = SIM_VOL_HALF } = {}) {
+  // Cover boot calls bootNext() once per frame. A normal `new GPUTrails()` runs every stage immediately.
+  static BOOT_STEPS = 7;
+
+  constructor(renderer, { count = TRAIL_COUNT, seedPositions = null, volTex = null, volHalf = SIM_VOL_HALF, staged = false } = {}) {
     this.renderer = renderer;
     this.count = count;
     this.historyLen = TRAIL_HISTORY;
@@ -175,10 +178,46 @@ export class GPUTrails {
     this._tailBurstNow = 0;      // gain gate — nonzero only during the post-click window
     this._tailBurstCapNow = 0;   // firework-shaped per-frame budget, recomputed each frame
 
+    this._volTex = volTex;
+    this._volHalf = volHalf;
+    this._bootStage = 0;
+    this.ready = false;
+    if (!staged) {
+      while (!this.ready) this.bootNext();
+    }
+  }
+
+  bootNext() {
+    switch (this._bootStage) {
+      case 0: this._stageSeeds(); break;
+      case 1: this._stageSim(); break;
+      case 2: this._stageHistory(true); break;
+      case 3: this._stageHistory(false); break;
+      case 4: this._stagePasses(); break;
+      case 5: this._stageRibbon(); break;
+      case 6: this._initHistory(); this.ready = true; break;
+      default: this.ready = true; break;
+    }
+    this._bootStage++;
+    return this.ready;
+  }
+
+  _touchTarget(target) {
+    const prev = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(target);
+    this.renderer.clear(true, false, false);
+    this.renderer.setRenderTarget(prev);
+  }
+
+  _stageSeeds() {
+    this._builtSeeds = this._buildSeeds(this._seeds, this.count);
+  }
+
+  _stageSim() {
     // 1. Heads — a dedicated flow sim (same code as the mesh cloud). Painted trail heads
     //    live longer than mesh particles (uPaintLifeBoost) so a ribbon holds the mark
     //    longer before recycling; meshes keep the default 0.
-    this.sim = new ParticleSim(renderer, count, this._buildSeeds(seedPositions, count));
+    this.sim = new ParticleSim(this.renderer, this.count, this._builtSeeds);
     this.sim.mat.uniforms.uPaintLifeBoost.value = PAINT_LIFE_BOOST;
     // Trails-only post-surge creep: settled painted ribbons keep a gentle outward drift
     // instead of freezing once the firework decays (meshes keep 0 — see paintField.glsl).
@@ -191,20 +230,30 @@ export class GPUTrails {
     // Mood maps into this band each frame (main.js); panel edits min/max live.
     this.spawnDriftMin = TRAIL_SPAWN_DRIFT_MIN;
     this.spawnDriftMax = TRAIL_SPAWN_DRIFT_MAX;
-    if (volTex) this.sim.setVolume(volTex, volHalf);
+    if (this._volTex) this.sim.setVolume(this._volTex, this._volHalf);
     this.Wt = this.sim.width;
     this.Ht = this.sim.height;
+  }
 
-    // 2. History ping-pong (Wt × Ht·L float RGBA).
+  _stageHistory(first) {
+    // History ping-pong (Wt × Ht·L float RGBA). One target per frame so the
+    // driver allocation does not stack into a single long stall.
+    if (!this._rtOpts) {
+      this._rtOpts = {
+        type: THREE.FloatType, format: THREE.RGBAFormat,
+        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+        wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+        depthBuffer: false, stencilBuffer: false,
+      };
+    }
+    const target = new THREE.WebGLRenderTarget(this.Wt, this.Ht * this.historyLen, this._rtOpts);
+    this._touchTarget(target);
+    if (first) this.histA = target;
+    else this.histB = target;
+  }
+
+  _stagePasses() {
     const L = this.historyLen;
-    const rtOpts = {
-      type: THREE.FloatType, format: THREE.RGBAFormat,
-      minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
-      wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
-      depthBuffer: false, stencilBuffer: false,
-    };
-    this.histA = new THREE.WebGLRenderTarget(this.Wt, this.Ht * L, rtOpts);
-    this.histB = new THREE.WebGLRenderTarget(this.Wt, this.Ht * L, rtOpts);
 
     // 2b. Per-trail shaped burst vector (Wt × Ht). Recomputed by the burst pass while
     // a click is fresh; the record pass reads it (one fetch/slot) to bend the tail.
@@ -293,7 +342,10 @@ export class GPUTrails {
       },
     });
     this.recordQuad = new FullScreenQuad(this.recordMat);
+  }
 
+  _stageRibbon() {
+    const L = this.historyLen;
     // 3. Ribbon geometry: a camera-facing quad strip along a Catmull-Rom spline through
     //    the L recorded points. Each of the L-1 segments is subdivided SUB times, so the
     //    curve reads smooth (not faceted). M points → 2M verts, M-1 quads (2 tris each).
@@ -315,7 +367,7 @@ export class GPUTrails {
     }
 
     const geom = new THREE.InstancedBufferGeometry();
-    geom.instanceCount = count;
+    geom.instanceCount = this.count;
     geom.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(vertCount * 3), 3));
     geom.setAttribute('aParam', new THREE.Float32BufferAttribute(aParam, 1));
     geom.setAttribute('aSide', new THREE.Float32BufferAttribute(aSide, 1));
@@ -418,10 +470,6 @@ export class GPUTrails {
     this.trailScene.add(this.object3D);
 
     this._view = new THREE.Matrix4();
-
-    // Seed the history from the initial head positions so nothing draws garbage
-    // before the ring fills.
-    this._initHistory();
   }
 
   // Build a count-length seed array by DENSITY-WEIGHTED sampling of the shape seeds

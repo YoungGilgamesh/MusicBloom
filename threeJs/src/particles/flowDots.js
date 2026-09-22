@@ -224,6 +224,9 @@ export class FlowDots {
    * @param {string[]} [opts.warpOrder]
    * @param {number} [opts.dominance]
    */
+  // Cover boot calls bootNext() once per frame. A normal `new FlowDots()` runs every stage immediately.
+  static BOOT_STEPS = 3;
+
   constructor(renderer, {
     count,
     volTex,
@@ -231,24 +234,55 @@ export class FlowDots {
     mood = { energy: 0.5, brightness: 0.5, texture: 0.5, heaviness: 0.5, dynamism: 0.5, bpm: 120 },
     warpOrder = ['energy', 'brightness'],
     dominance,
+    staged = false,
+    skipSample = false,
   }) {
     this.count = Math.max(1, count | 0);
     this.enabled = true;
     // Scratch vector for the camera forward direction — see update()'s sim.update
     // call (forward-biased respawn reach, matching this element's own fade below).
     this._camFwd = new THREE.Vector3(0, 0, -1);
+    this.renderer = renderer;
+    this._opts = { volTex, volHalf, mood, warpOrder, dominance, skipSample };
+    this._bootStage = 0;
+    this.ready = false;
+    if (!staged) {
+      while (!this.ready) this.bootNext();
+    }
+  }
 
+  bootNext() {
+    switch (this._bootStage) {
+      case 0: this._stageSeeds(); break;
+      case 1: this._stageSim(); break;
+      case 2: this._stageMesh(); this.ready = true; break;
+      default: this.ready = true; break;
+    }
+    this._bootStage++;
+    return this.ready;
+  }
+
+  _stageSeeds() {
+    if (this._opts.skipSample) {
+      this.seedPositions = new Float32Array(this.count * 3);
+      return;
+    }
+    const mood = this._opts.mood;
     const { positions } = sampleAll6Cloud(
       this.count,
       mood.energy, mood.brightness, mood.texture,
       mood.heaviness, mood.dynamism, mood.bpm,
-      warpOrder, dominance,
+      this._opts.warpOrder, this._opts.dominance,
     );
     this.seedPositions = positions;
+  }
 
-    this.sim = new ParticleSim(renderer, this.count, positions);
-    this.sim.setVolume(volTex, volHalf);
+  _stageSim() {
+    this.sim = new ParticleSim(this.renderer, this.count, this.seedPositions);
+    this.sim.setVolume(this._opts.volTex, this._opts.volHalf);
+  }
 
+  _stageMesh() {
     const ids = new Float32Array(this.count);
     const sizes = new Float32Array(this.count);
     const hues = new Float32Array(this.count);
@@ -305,8 +339,8 @@ export class FlowDots {
         uLitScale: { value: FLOW_DOTS_LIT_SCALE },
         uOpacity: { value: FLOW_DOTS_OPACITY },
         uToneExposure: { value: TONE_MAPPING_EXPOSURE },
-        uVelVolume: { value: volTex },
-        uVolHalf: { value: volHalf },
+        uVelVolume: { value: this._opts.volTex },
+        uVolHalf: { value: this._opts.volHalf },
         uInstPeriod: { value: SIM_INST_PERIOD },
         uInstJitter: { value: SIM_INST_JITTER },
         uScaleMin: { value: SIM_INST_SCALE_MIN },

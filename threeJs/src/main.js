@@ -181,59 +181,62 @@ function waitFrames(n = 1) {
   });
 }
 
+async function loadMarked(importer, mark) {
+  const mod = await importer();
+  setBootProgress(mark);
+  await waitFrames(2);
+  return mod;
+}
+
 async function loadThreeStack() {
-  const [
-    threeMod,
-    composerMod,
-    renderPassMod,
-    shaderPassMod,
-    passMod,
-    fxaaMod,
-  ] = await Promise.all([
-    import('three'),
-    import('three/addons/postprocessing/EffectComposer.js'),
-    import('three/addons/postprocessing/RenderPass.js'),
-    import('three/addons/postprocessing/ShaderPass.js'),
-    import('three/addons/postprocessing/Pass.js'),
-    import('three/addons/shaders/FXAAShader.js'),
-  ]);
+  const threeMod = await loadMarked(() => import('three'), 0.18);
   THREE = threeMod;
-  EffectComposer = composerMod.EffectComposer;
-  RenderPass = renderPassMod.RenderPass;
-  ShaderPass = shaderPassMod.ShaderPass;
+  // Paint shader, each field, the simulator, and the trail shaders load here,
+  // one file per frame, so the later dot/trail imports are already in cache.
+  await loadMarked(() => import('./particles/paintField.glsl.js'), 0.22);
+  await loadMarked(() => import('./particles/fields/energy.js'), 0.26);
+  await loadMarked(() => import('./particles/fields/brightness.js'), 0.3);
+  await loadMarked(() => import('./particles/fields/texture.js'), 0.34);
+  await loadMarked(() => import('./particles/fields/heaviness.js'), 0.38);
+  await loadMarked(() => import('./particles/fields/dynamism.js'), 0.42);
+  await loadMarked(() => import('./particles/fields/bpm.js'), 0.46);
+  await loadMarked(() => import('./particles/fields/combine.js'), 0.5);
+  await loadMarked(() => import('./particles/instanceTransform.glsl.js'), 0.54);
+  await loadMarked(() => import('./particles/particleSim.js'), 0.58);
+  await loadMarked(() => import('./render/toneMap.glsl.js'), 0.6);
+  await loadMarked(() => import('./particles/beatField.glsl.js'), 0.62);
+  await loadMarked(() => import('./particles/seedDensity.js'), 0.64);
+  await loadMarked(() => import('./particles/gpuTrailsShaders.js'), 0.68);
+  const passMod = await loadMarked(() => import('three/addons/postprocessing/Pass.js'), 0.7);
   Pass = passMod.Pass;
+  const renderPassMod = await loadMarked(() => import('three/addons/postprocessing/RenderPass.js'), 0.71);
+  RenderPass = renderPassMod.RenderPass;
+  const shaderPassMod = await loadMarked(() => import('three/addons/postprocessing/ShaderPass.js'), 0.72);
+  ShaderPass = shaderPassMod.ShaderPass;
+  const composerMod = await loadMarked(() => import('three/addons/postprocessing/EffectComposer.js'), 0.73);
+  EffectComposer = composerMod.EffectComposer;
+  const fxaaMod = await loadMarked(() => import('three/addons/shaders/FXAAShader.js'), 0.74);
   FXAAShader = fxaaMod.FXAAShader;
 }
 
 async function loadCoverGpu() {
-  const [
-    trailsMod,
-    dotsMod,
-    orbitMod,
-    pickMod,
-    flyMod,
-    frameMod,
-    fsMod,
-    resultMod,
-  ] = await Promise.all([
-    import('./particles/gpuTrails.js'),
-    import('./particles/flowDots.js'),
-    import('./camera/orbitControls.js'),
-    import('./interaction/particlePick.js'),
-    import('./interaction/flyControls.js'),
-    import('./camera/frameCloud.js'),
-    import('./interaction/fullscreenToggle.js'),
-    import('./interaction/resultBloom2d.js'),
-  ]);
-  GPUTrails = trailsMod.GPUTrails;
-  FlowDots = dotsMod.FlowDots;
+  const orbitMod = await loadMarked(() => import('./camera/orbitControls.js'), 0.82);
   createOrbitControls = orbitMod.createOrbitControls;
-  createParticlePicker = pickMod.createParticlePicker;
-  createFlyControls = flyMod.createFlyControls;
-  frameCloudCamera = frameMod.frameCloudCamera;
+  const fsMod = await loadMarked(() => import('./interaction/fullscreenToggle.js'), 0.83);
   attachFullscreenToggle = fsMod.attachFullscreenToggle;
+  const frameMod = await loadMarked(() => import('./camera/frameCloud.js'), 0.84);
+  frameCloudCamera = frameMod.frameCloudCamera;
+  const flyMod = await loadMarked(() => import('./interaction/flyControls.js'), 0.85);
+  createFlyControls = flyMod.createFlyControls;
+  const pickMod = await loadMarked(() => import('./interaction/particlePick.js'), 0.86);
+  createParticlePicker = pickMod.createParticlePicker;
+  const resultMod = await loadMarked(() => import('./interaction/resultBloom2d.js'), 0.87);
   playResultBloom2d = resultMod.playResultBloom2d;
   playResultGather2d = resultMod.playResultGather2d;
+  const dotsMod = await loadMarked(() => import('./particles/flowDots.js'), 0.9);
+  FlowDots = dotsMod.FlowDots;
+  const trailsMod = await loadMarked(() => import('./particles/gpuTrails.js'), 0.93);
+  GPUTrails = trailsMod.GPUTrails;
 }
 
 function ensureGameplayMods() {
@@ -278,11 +281,19 @@ async function loadGameplayGpu() {
   gameplayModsReady = true;
 }
 
+function setBootProgress(fraction) {
+  const fill = document.getElementById('boot-bar-fill');
+  if (!fill) return;
+  const t = Math.max(0, Math.min(1, fraction));
+  fill.style.width = `${t * 100}%`;
+}
+
 async function startApp() {
-// Yield so the static HTML can paint, then compile Three, then open WebGL.
-await waitFrames(1);
+// Two frames: the progress mark paints before the next blocking step.
+setBootProgress(0.12);
+await waitFrames(2);
 await loadThreeStack();
-await waitFrames(1);
+await waitFrames(2);
 
 // ── Scene setup ───────────────────────────────────────────────────────────────
 
@@ -322,6 +333,8 @@ renderer.setPixelRatio(basePixelRatio * COVER_PIXEL_RATIO_MUL);
   renderer.setSize(w, h);
 }
 document.body.appendChild(renderer.domElement);
+setBootProgress(0.78);
+await waitFrames(2);
 
 // Cover-only antialiasing — a post-process FXAA pass, NOT the WebGL context's
 // native `antialias:true` flag (that's fixed at context-creation and can't be
@@ -379,9 +392,11 @@ Object.assign(vignetteEl.style, {
   background: `radial-gradient(ellipse at center, transparent ${VIGNETTE_SIZE}%, rgba(0,0,0,${VIGNETTE_STRENGTH}) 100%)`,
 });
 document.body.appendChild(vignetteEl);
+setBootProgress(0.8);
+await waitFrames(2);
 
 await loadCoverGpu();
-await waitFrames(1);
+await waitFrames(2);
 
 // ── Cover page / gameplay phase machine ───────────────────────────────────────
 // 'cover' = attract-mode splash (orbit camera, trail/dots only, random shape,
@@ -669,7 +684,9 @@ let particles = null;
 let particleSim = null;
 let u = null;
 let trail = null;
+let trailBoot = null;
 let flowDots = null;
+let dotsBoot = null;
 let meshTypeCache = null;
 let lastMeshMix = null;
 let dust = null;
@@ -874,27 +891,46 @@ function applyCoverDotsSetup() {
   flowDots.spawnElapsed = 0;
 }
 
-function ensureCoverTrails() {
-  if (trail || !TRAIL_ENABLED) return;
-  trail = new GPUTrails(renderer, {
+function beginCoverTrails() {
+  if (trail || trailBoot || !TRAIL_ENABLED) return;
+  trailBoot = new GPUTrails(renderer, {
     seedPositions: randomSeedsInSphere(TRAIL_COUNT, COVER_CLOUD_RADIUS),
     volTex,
     volHalf: SIM_VOL_HALF,
+    staged: true,
   });
+}
+
+function stepCoverTrails() {
+  if (!trailBoot) return;
+  if (!trailBoot.bootNext()) return;
+  trail = trailBoot;
+  trailBoot = null;
   applyCoverTrailSetup();
+  applyCoverColor();
   if (picker?.setTrail) picker.setTrail(trail);
 }
 
-function ensureCoverDots() {
-  if (flowDots || !FLOW_DOTS_ENABLED) return;
-  flowDots = new FlowDots(renderer, {
+function beginCoverDots() {
+  if (flowDots || dotsBoot || !FLOW_DOTS_ENABLED) return;
+  dotsBoot = new FlowDots(renderer, {
     count: Math.max(1, FLOW_DOTS_COUNT | 0),
     volTex,
     volHalf: SIM_VOL_HALF,
     mood: coverMood,
     warpOrder: coverWarpOrder,
+    staged: true,
+    skipSample: true,
   });
+}
+
+function stepCoverDots() {
+  if (!dotsBoot) return;
+  if (!dotsBoot.bootNext()) return;
+  flowDots = dotsBoot;
+  dotsBoot = null;
   applyCoverDotsSetup();
+  applyCoverColor();
   if (picker?.setFlowDots) picker.setFlowDots(flowDots);
 }
 
@@ -1559,15 +1595,22 @@ function loopBackToCover() {
 function fadeInCoverUi() {
   coverUiPending = false;
   const advice = adviceEl;
+  const bootBar = document.getElementById('boot-bar');
   if (!advice) {
+    if (bootBar) bootBar.remove();
     revealCoverTitleUi();
     return;
   }
   const adviceFadeSec = 0.55;
   advice.style.transition = `opacity ${adviceFadeSec}s ease`;
-  requestAnimationFrame(() => { advice.style.opacity = '0'; });
+  if (bootBar) bootBar.style.transition = `opacity ${adviceFadeSec}s ease`;
+  requestAnimationFrame(() => {
+    advice.style.opacity = '0';
+    if (bootBar) bootBar.style.opacity = '0';
+  });
   window.setTimeout(() => {
     advice.remove();
+    if (bootBar) bootBar.remove();
     if (adviceEl === advice) adviceEl = null;
     window.setTimeout(revealCoverTitleUi, 1000);
   }, adviceFadeSec * 1000);
@@ -1927,58 +1970,59 @@ const picker = createParticlePicker({
 // both are still held at opacity/spawnFrac 0 at this point (see the initial-load
 // hold set right after their construction above), so nothing visibly renders.
 // Runs after the first frame so the GL context is fully ready.
-let coverBootStep = 0;
-function runCoverBootSlice() {
+const coverSteps = [];
+if (TRAIL_ENABLED) {
+  coverSteps.push(beginCoverTrails);
+  for (let i = 0; i < GPUTrails.BOOT_STEPS; i++) coverSteps.push(stepCoverTrails);
+}
+if (FLOW_DOTS_ENABLED) {
+  coverSteps.push(beginCoverDots);
+  for (let i = 0; i < FlowDots.BOOT_STEPS; i++) coverSteps.push(stepCoverDots);
+}
+coverSteps.push(() => { if (trail) trail.warmupPaint(camera.position); });
+coverSteps.push(() => {
+  if (!trail) return;
   const pos = camera.position;
+  trail.update(1 / 60, pos, 0, camera, null, null);
+  trail.render(renderer, camera);
+});
+coverSteps.push(() => { if (flowDots) flowDots.update(1 / 60, camera, 0, null); });
+coverSteps.push(async () => {
+  await renderer.compileAsync(scene, camera);
+  if (trail) await renderer.compileAsync(trail.trailScene, camera);
+});
+coverSteps.push(() => { composer.render(); });
+
+let coverBootStep = 0;
+let coverBootBusy = false;
+function finishCoverBoot() {
+  initialWarmupDone = true;
+  setBootProgress(1);
+  ensureGameplayMods();
+  maybeStartInitialCoverFadeIn();
+}
+async function runCoverBootSlice() {
+  if (coverBootBusy || coverBootStep >= coverSteps.length) return;
+  coverBootBusy = true;
+  setBootProgress(0.93 + 0.07 * ((coverBootStep + 1) / coverSteps.length));
+  await waitFrames(2);
   try {
-    switch (coverBootStep) {
-      case 0:
-        ensureCoverTrails();
-        applyCoverColor();
-        break;
-      case 1:
-        ensureCoverDots();
-        applyCoverColor();
-        break;
-      case 2:
-        if (trail) trail.warmupPaint(pos);
-        break;
-      case 3:
-        if (trail) {
-          trail.update(1 / 60, pos, 0, camera, null, null);
-          trail.render(renderer, camera);
-        }
-        break;
-      case 4:
-        if (flowDots) flowDots.update(1 / 60, camera, 0, null);
-        break;
-      case 5:
-        renderer.compile(scene, camera);
-        break;
-      case 6:
-        composer.render();
-        initialWarmupDone = true;
-        ensureGameplayMods();
-        maybeStartInitialCoverFadeIn();
-        return;
-      default:
-        initialWarmupDone = true;
-        ensureGameplayMods();
-        maybeStartInitialCoverFadeIn();
-        return;
-    }
+    await coverSteps[coverBootStep]();
   } catch (err) {
     console.warn('[warmup] cover boot slice failed:', err);
-    initialWarmupDone = true;
-    ensureGameplayMods();
-    maybeStartInitialCoverFadeIn();
+    coverBootBusy = false;
+    finishCoverBoot();
     return;
   }
   coverBootStep++;
+  coverBootBusy = false;
+  if (coverBootStep >= coverSteps.length) {
+    finishCoverBoot();
+    return;
+  }
   requestAnimationFrame(runCoverBootSlice);
 }
-// Two frames so the headphones advice can paint before GPU construction.
-requestAnimationFrame(() => requestAnimationFrame(runCoverBootSlice));
+requestAnimationFrame(runCoverBootSlice);
 
 // ── Animate ───────────────────────────────────────────────────────────────────
 
